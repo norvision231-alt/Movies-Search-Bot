@@ -5,7 +5,7 @@ from typing import Optional
 from aiohttp import web, ClientTimeout
 from motor.motor_asyncio import AsyncIOMotorClient
 from pymongo import ASCENDING, DESCENDING
-from pyrogram import Client, filters
+from pyrogram import Client, filters, idle
 from pyrogram.errors import FloodWait
 from pyrogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
@@ -212,10 +212,15 @@ async def tmdb_get(path: str, params: Optional[dict] = None) -> dict:
     async with aiohttp.ClientSession(timeout=timeout) as session:
         async with session.get(f"https://api.themoviedb.org/3{path}", params=p, headers=tmdb_headers()) as r:
             if r.status == 429:
-                raise RuntimeError("TMDB rate limit reached. Please retry shortly.")
+                raise RuntimeError("TMDB_RATE_LIMIT")
+            if r.status in (401, 403):
+                body = await r.text()
+                raise RuntimeError("TMDB_AUTH_ERROR: invalid/inactive API credential. Check TMDB_API_TOKEN or TMDB_API_KEY in Render Environment.")
+            if r.status >= 500:
+                raise RuntimeError(f"TMDB_SERVER_ERROR: HTTP {r.status}")
             if r.status >= 400:
                 body = await r.text()
-                raise RuntimeError(f"TMDB HTTP {r.status}: {body[:300]}")
+                raise RuntimeError(f"TMDB_HTTP_ERROR: HTTP {r.status}: {body[:250]}")
             return await r.json()
 
 
@@ -675,6 +680,48 @@ async def plain_search(client, message):
 
 
 # ---------------- CALLBACKS ----------------
+
+# ---------------- INLINE SEARCH ----------------
+@app.on_inline_query()
+async def inline_search(client, query):
+    q = (query.query or "").strip()
+    if not q:
+        await query.answer([], cache_time=2, is_personal=True)
+        return
+    uid = int(query.from_user.id)
+    try:
+        if await is_banned(uid) and not is_admin(uid):
+            await query.answer([], cache_time=1, is_personal=True)
+            return
+        s = await get_settings()
+        if s.get("maintenance_mode") and not is_admin(uid):
+            await query.answer([], cache_time=1, is_personal=True)
+            return
+        if not s.get("movie_search_enabled", True):
+            await query.answer([], cache_time=2, is_personal=True)
+            return
+        results = await tmdb_search(q)
+        from pyrogram.types import InlineQueryResultArticle, InputTextMessageContent
+        inline_results = []
+        for item in results[:SEARCH_LIMIT]:
+            mt = item.get("media_type")
+            tid = int(item.get("id"))
+            title = title_of(item, mt)
+            year = (release_of(item, mt) or "")[:4] or "----"
+            desc = (item.get("overview") or "").replace("\n", " ")[:120]
+            text = f"🔎 {title} ({year})\n\n/search {title}"
+            inline_results.append(
+                InlineQueryResultArticle(
+                    id=f"{mt}:{tid}",
+                    title=f"{'🎬' if mt == 'movie' else '📺'} {title} ({year})",
+                    description=desc or "Open movie details",
+                    input_message_content=InputTextMessageContent(text),
+                )
+            )
+        await query.answer(inline_results, cache_time=30, is_personal=False, switch_pm_text="Open Movie Bot", switch_pm_parameter="start")
+    except Exception:
+        await query.answer([], cache_time=1, is_personal=True)
+
 @app.on_callback_query()
 async def callbacks(client, q):
     uid = int(q.from_user.id)
@@ -847,39 +894,42 @@ async def main():
     missing = [k for k, v in required if not v]
     if missing:
         raise RuntimeError("Missing environment variables: " + ", ".join(missing))
-    await users.create_index([("banned", ASCENDING)])
-    await users.create_index([("referred_by", ASCENDING)])
-    await movies.create_index([("aliases", ASCENDING)])
-    await movies.create_index([("normalized_title", ASCENDING)])
-    await movies.create_index([("release_date", ASCENDING)])
-    await movies.create_index([("updated_at", DESCENDING)])
-    await settings_col.update_one({"_id": "global"}, {"$setOnInsert": DEFAULT_SETTINGS}, upsert=True)
+
+    # Index creation is best-effort so a transient Mongo issue does not prevent Telegram startup.
+    for collection, spec in (
+        (users, [("banned", ASCENDING)]),
+        (users, [("referred_by", ASCENDING)]),
+        (movies, [("aliases", ASCENDING)]),
+        (movies, [("normalized_title", ASCENDING)]),
+        (movies, [("release_date", ASCENDING)]),
+        (movies, [("updated_at", DESCENDING)]),
+    ):
+        with contextlib.suppress(Exception):
+            await collection.create_index(spec)
+    with contextlib.suppress(Exception):
+        await settings_col.update_one({"_id": "global"}, {"$setOnInsert": DEFAULT_SETTINGS}, upsert=True)
 
     web_app = web.Application()
     web_app.router.add_get("/", health)
     web_app.router.add_get("/health", health)
-    runner = web.AppRunner(web_app)
+    runner = web.AppRunner(web_app, access_log=log)
     await runner.setup()
     site = web.TCPSite(runner, "0.0.0.0", PORT)
     await site.start()
+    log.info("Web server listening on %s", PORT)
 
-    stop = asyncio.Event()
-    def shutdown(*_):
-        stop.set()
-    with contextlib.suppress(Exception):
-        import signal
-        signal.signal(signal.SIGTERM, shutdown)
-        signal.signal(signal.SIGINT, shutdown)
+    if TMDB_API_TOKEN or TMDB_API_KEY:
+        log.info("TMDB credential configured: %s", "Bearer token" if TMDB_API_TOKEN else "v3 API key")
+    else:
+        log.warning("TMDB credential missing; bot will stay online but movie search cannot work.")
 
     try:
+        # Use Pyrofork's managed client.run() loop; it avoids the manual start/asyncio.run
+        # lifecycle that can leave dispatcher tasks attached to a closing loop during Render deploys.
         await app.start()
         me = await app.get_me()
         log.info("Movie bot started as @%s", me.username)
-        log.info("Web server listening on %s", PORT)
-        await stop.wait()
-    except FloodWait as e:
-        log.error("Telegram startup FloodWait: %s seconds", e.value)
-        await asyncio.sleep(e.value)
+        await idle()
     finally:
         with contextlib.suppress(Exception):
             await runner.cleanup()
@@ -892,6 +942,6 @@ async def main():
 
 if __name__ == "__main__":
     try:
-        asyncio.run(main())
+        app.run(main())
     except KeyboardInterrupt:
         pass
