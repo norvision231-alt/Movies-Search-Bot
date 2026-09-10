@@ -123,7 +123,7 @@ log = logging.getLogger("file-store-bot")
 # 3) CLIENT + DATABASE
 # ============================================================
 app = Client(
-    "MovieFileStoreBotV12",
+    "MovieFileStoreBotV14",
     api_id=API_ID,
     api_hash=API_HASH,
     bot_token=BOT_TOKEN,
@@ -524,7 +524,7 @@ async def render_admin_panel() -> tuple[str, InlineKeyboardMarkup]:
         f"📢 Broadcast: {'ON' if s['broadcast_enabled'] else 'OFF'}\n"
         f"🛠 Maintenance: {'ON' if s['maintenance_mode'] else 'OFF'}\n\n"
         f"📦 Max File: <b>{humanbytes(int(s.get('max_file_bytes', MAX_FILE_BYTES)))}</b>\n"
-        f"📚 Version: <code>MovieStore V12</code>"
+        f"📚 Version: <code>MovieStore V14</code>"
     )
     return text, admin_menu(s)
 
@@ -2093,3 +2093,4 @@ if __name__ == "__main__":
         app.run(main())
     except KeyboardInterrupt:
         pass
+
