@@ -22,7 +22,7 @@ from pyrogram.types import (
 )
 
 # ============================================================
-# MOVIE SEARCH BOT — FINAL V16 (STANDALONE)
+# MOVIE SEARCH BOT — FINAL V17 (STANDALONE)
 # ============================================================
 # ONLY MOVIE / TV SEARCH. No file-store, FTP, StreamHG, Oracle.
 # TMDB = source of movie/TV metadata.
@@ -59,9 +59,12 @@ WATCH_CACHE_HOURS = max(1, int(os.getenv("WATCH_CACHE_HOURS", "12")))
 SEARCH_LIMIT = max(3, min(int(os.getenv("MOVIE_SEARCH_LIMIT", "8")), 10))
 AI_TIMEOUT = max(5, int(os.getenv("AI_TIMEOUT", "10")))
 
-MOVIE_WEBSITE_URL = os.getenv("MOVIE_WEBSITE_URL", "").strip().rstrip("/")
-TRAILER_BUTTON = os.getenv("TRAILER_BUTTON", "1").lower() in {"1", "true", "yes", "on"}
 PUBLISH_CANONICAL = os.getenv("PUBLISH_CANONICAL", "1").lower() in {"1", "true", "yes", "on"}
+
+BRAND_NAME = os.getenv("BRAND_NAME", "Your Brand").strip() or "Your Brand"
+BRAND_CHANNEL_URL = os.getenv("BRAND_CHANNEL_URL", "").strip()
+BRAND_BOT_URL = os.getenv("BRAND_BOT_URL", "").strip()
+BRAND_INSTAGRAM_URL = os.getenv("BRAND_INSTAGRAM_URL", "").strip()
 
 # Initial values only; admin can modify these at runtime in MongoDB.
 INITIAL_JOIN_1 = os.getenv("REQUIRED_CHANNEL_1", "").strip()
@@ -84,7 +87,7 @@ SEED_BATCH_SIZE = max(1, min(int(os.getenv("SEED_BATCH_SIZE", "2")), 10))
 
 # -------------------- APP / DB --------------------
 app = Client(
-    "MovieSearchBotV16",
+    "MovieSearchBotV18",
     api_id=API_ID,
     api_hash=API_HASH,
     bot_token=BOT_TOKEN,
@@ -125,22 +128,18 @@ DEFAULT_SETTINGS = {
     "join_1_url": INITIAL_JOIN_1_URL,
     "join_2_url": INITIAL_JOIN_2_URL,
     "result_channel": INITIAL_RESULT_CHANNEL,
-    "website_url": MOVIE_WEBSITE_URL,
-    "trailer_enabled": TRAILER_BUTTON,
+    "brand_name": BRAND_NAME,
+    "brand_channel_url": BRAND_CHANNEL_URL,
+    "brand_bot_url": BRAND_BOT_URL,
+    "brand_instagram_url": BRAND_INSTAGRAM_URL,
     "publish_canonical": PUBLISH_CANONICAL,
-    "promo_enabled": True,
-    "promo_1_text": "",
-    "promo_1_url": "",
-    "promo_2_text": "",
-    "promo_2_url": "",
-    "promo_3_text": "",
-    "promo_3_url": "",
     "seed_queue": [],
     "seed_catalog_enabled": True,
 }
 
 # Short-lived states, never intended as permanent storage.
 admin_input_state: dict[int, str] = {}
+suggestion_state: dict[str, dict] = {}
 
 SEED_SOURCES = [
     ("movie_popular", "/movie/popular", "movie"),
@@ -510,15 +509,25 @@ async def rank_candidates(query: str, candidates: list[dict]) -> list[int]:
 
 async def corrected_query(query: str) -> Optional[str]:
     prompt = (
-        "Correct a movie or TV search query with possible spelling mistakes, transliteration or typos. "
-        "Return ONLY the corrected title. If the input already looks correct, return it unchanged.\n"
-        f"QUERY: {query}"
+        "You are a movie and TV search correction assistant. Correct only the user's search phrase. "
+        "Handle typos, misspellings, transliteration, missing spaces, year hints and season hints. "
+        "Do not invent a title. Return ONLY the corrected movie/TV title. "
+        "If you cannot confidently identify a likely title, return exactly NO_CONFIDENT_MATCH.\n"
+        f"USER QUERY: {query}"
     )
     result = await ai_chat(prompt)
     if not result:
         return None
-    result = result.strip().strip("\"'")
+    result = result.strip().strip('"\'')
+    if result.upper() == "NO_CONFIDENT_MATCH":
+        return None
     return safe_text(result, 160) if result else None
+
+
+def google_spell_url(text: str) -> str:
+    from urllib.parse import quote_plus
+    return "https://www.google.com/search?q=" + quote_plus(f"{text} correct spelling movie")
+
 
 
 # ============================================================
@@ -552,63 +561,79 @@ def top_cast(details: dict, limit: int = 5) -> list[str]:
 
 
 def provider_names(provider_doc: dict, region: str) -> tuple[list[str], Optional[str]]:
+    """Return only free/ad-supported providers and one regional link when free is available."""
     region_data = (provider_doc.get("results") or {}).get(region) or {}
-    names: list[str] = []
-    seen: set[str] = set()
-    for bucket in ("flatrate", "free", "ads", "rent", "buy"):
+    names = []
+    seen = set()
+    for bucket in ("free", "ads"):
         for provider in region_data.get(bucket) or []:
             name = provider.get("provider_name")
             if name and name not in seen:
                 seen.add(name)
                 names.append(name)
-    return names[:8], region_data.get("link")
+    return names[:6], (region_data.get("link") if names else None)
 
 
 def watch_page_url(media_type: str, tmdb_id: int) -> str:
     return f"https://www.themoviedb.org/{media_type}/{int(tmdb_id)}/watch"
 
 
-def format_caption(details: dict, mt: str, providers: Optional[list[str]] = None, region: str = "IN") -> str:
+def wrap_overview(text: str, max_lines: int = 5, width: int = 60) -> str:
+    words = re.findall(r"\S+", text or "")
+    lines = []
+    current = ""
+    for word in words:
+        if len(current) + len(word) + (1 if current else 0) <= width:
+            current = f"{current} {word}".strip()
+        else:
+            if current:
+                lines.append(current)
+            current = word
+            if len(lines) >= max_lines:
+                break
+    if len(lines) < max_lines and current:
+        lines.append(current)
+    return "\n".join(lines[:max_lines])
+
+
+def brand_button_rows(settings: dict) -> list[list[InlineKeyboardButton]]:
+    items = []
+    if str(settings.get("brand_channel_url") or "").strip():
+        items.append(("📢 TELEGRAM", settings.get("brand_channel_url")))
+    if str(settings.get("brand_bot_url") or "").strip():
+        items.append(("🤖 TELEGRAM BOT", settings.get("brand_bot_url")))
+    if str(settings.get("brand_instagram_url") or "").strip():
+        items.append(("📸 INSTAGRAM", settings.get("brand_instagram_url")))
+    rows = []
+    for i in range(0, len(items), 2):
+        row = [InlineKeyboardButton(items[i][0], url=str(items[i][1]))]
+        if i + 1 < len(items):
+            row.append(InlineKeyboardButton(items[i + 1][0], url=str(items[i + 1][1])))
+        rows.append(row)
+    return rows
+
+
+def format_caption(details: dict, mt: str, providers: Optional[list[str]] = None, region: str = "IN", settings: Optional[dict] = None) -> str:
+    settings = settings or {}
     title = title_of(details, mt)
     original = details.get("original_title") if mt == "movie" else details.get("original_name")
     rating = details.get("vote_average")
     rating_text = f"{float(rating):.1f}/10" if isinstance(rating, (int, float)) else "N/A"
-
-    langs = [
-        x.get("english_name") or x.get("iso_639_1")
-        for x in (details.get("spoken_languages") or [])
-        if x.get("english_name") or x.get("iso_639_1")
-    ]
+    langs = [x.get("english_name") or x.get("iso_639_1") for x in (details.get("spoken_languages") or []) if x.get("english_name") or x.get("iso_639_1")]
     lang_text = ", ".join(langs) or details.get("original_language") or "N/A"
-    genres = " • ".join(
-        x.get("name") for x in (details.get("genres") or []) if x.get("name")
-    ) or "N/A"
-    countries = ", ".join(
-        x.get("name") for x in (details.get("production_countries") or []) if x.get("name")
-    ) or "N/A"
+    genres = " • ".join(x.get("name") for x in (details.get("genres") or []) if x.get("name")) or "N/A"
+    countries = ", ".join(x.get("name") for x in (details.get("production_countries") or []) if x.get("name")) or "N/A"
     release = release_of(details, mt) or "N/A"
-
     lines = [
-        f"🔥 <b>{esc(title)}</b>",
-        "",
+        f"🔥 <b>{esc(title)}</b>", "",
         f"⭐ <b>TMDB:</b> {rating_text}",
-        f"🇮🇳 <b>Language:</b> {esc(lang_text)}",
+        f"🌐 <b>Language:</b> {esc(lang_text)}",
         f"🎭 <b>Genre:</b> {esc(genres)}",
     ]
-
     if mt == "movie":
-        runtime = details.get("runtime")
-        lines.extend([
-            f"⏱️ <b>Runtime:</b> {runtime or 'N/A'} min",
-            f"📅 <b>Release:</b> {esc(release)}",
-        ])
+        lines.extend([f"⏱️ <b>Runtime:</b> {details.get('runtime') or 'N/A'} min", f"📅 <b>Release:</b> {esc(release)}"])
     else:
-        lines.extend([
-            f"📺 <b>Seasons:</b> {details.get('number_of_seasons') or 'N/A'}",
-            f"⏱️ <b>Episodes:</b> {details.get('number_of_episodes') or 'N/A'}",
-            f"📅 <b>First Air:</b> {esc(release)}",
-        ])
-
+        lines.extend([f"📺 <b>Seasons:</b> {details.get('number_of_seasons') or 'N/A'}", f"⏱️ <b>Episodes:</b> {details.get('number_of_episodes') or 'N/A'}", f"📅 <b>First Air:</b> {esc(release)}"])
     lines.append(f"🌍 <b>Country:</b> {esc(countries)}")
     if original and original != title:
         lines.append(f"📝 <b>Original:</b> {esc(original)}")
@@ -618,66 +643,20 @@ def format_caption(details: dict, mt: str, providers: Optional[list[str]] = None
     cs = top_cast(details)
     if cs:
         lines.append(f"👥 <b>Cast:</b> {esc(', '.join(cs))}")
-
-    overview = safe_text(details.get("overview") or "No description available.", 550)
-    lines.extend(["", f"📖 <b>Overview:</b> {esc(overview)}"])
-
+    overview = wrap_overview(details.get("overview") or "No description available.", max_lines=5, width=62)
+    lines.extend(["", "📖 <b>Overview:</b>", esc(overview)])
     if providers:
-        lines.extend([
-            "",
-            f"📺 <b>Watch in {esc(region)}:</b> {esc(' • '.join(providers[:6]))}",
-            "ℹ️ <i>Availability data: JustWatch via TMDB</i>",
-        ])
-    else:
-        lines.extend([
-            "",
-            f"📺 <b>Watch in {esc(region)}:</b> Not listed",
-            "ℹ️ <i>Availability data: JustWatch via TMDB</i>",
-        ])
-
-    lines.extend(["", "━━━━━━━━━━━━━━", "ℹ️ <i>Metadata: TMDB</i>"])
+        lines.extend(["", f"🆓 <b>Free to watch in {esc(region)}:</b> {esc(' • '.join(providers))}"])
+    lines.extend(["", "━━━━━━━━━━━━━━", f"<b>{esc(settings.get('brand_name') or BRAND_NAME)}</b>"])
     return "\n".join(lines)[:4096]
 
 
 async def movie_keyboard(details: dict, mt: str, settings: Optional[dict] = None, watch_link: Optional[str] = None) -> InlineKeyboardMarkup:
-    s = settings or await get_settings()
-    title = title_of(details, mt)
-    tid = int(details["id"])
-    rows: list[list[InlineKeyboardButton]] = []
-
-    website = (s.get("website_url") or MOVIE_WEBSITE_URL).strip().rstrip("/")
-    if website:
-        rows.append([
-            InlineKeyboardButton(
-                "▶️ WATCH HERE",
-                url=f"{website}/watch/{mt}/{tid}/{slugify(title)}",
-            )
-        ])
-
-    tr = trailer_url(details)
-    if s.get("trailer_enabled", TRAILER_BUTTON) and tr:
-        rows.append([InlineKeyboardButton("🎬 TRAILER", url=tr)])
-
-    imdb = ((details.get("external_ids") or {}).get("imdb_id"))
-    if imdb:
-        rows.append([InlineKeyboardButton("⭐ IMDb", url=f"https://www.imdb.com/title/{imdb}/")])
-
-    rows.append([
-        InlineKeyboardButton(
-            "🌍 WHERE TO WATCH",
-            url=watch_link or watch_page_url(mt, tid),
-        )
-    ])
-    rows.append([InlineKeyboardButton("📤 SHARE", switch_inline_query=title)])
-
-    # Admin-configurable promotion buttons.
-    if s.get("promo_enabled", True):
-        for i in range(1, 4):
-            text = (s.get(f"promo_{i}_text") or "").strip()
-            url = (s.get(f"promo_{i}_url") or "").strip()
-            if text and url:
-                rows.append([InlineKeyboardButton(text[:64], url=url)])
-
+    settings = settings or await get_settings()
+    rows = []
+    if watch_link:
+        rows.append([InlineKeyboardButton("🆓 WHERE TO WATCH FREE", url=watch_link)])
+    rows.extend(brand_button_rows(settings))
     return InlineKeyboardMarkup(rows)
 
 
@@ -686,79 +665,56 @@ async def movie_keyboard(details: dict, mt: str, settings: Optional[dict] = None
 # ============================================================
 async def get_watch_data(mt: str, tmdb_id: int, region: str, force: bool = False) -> tuple[list[str], Optional[str]]:
     if not force:
-        existing = await movies.find_one(
-            {"_id": f"{mt}:{int(tmdb_id)}"},
-            {"watch_providers": 1, "watch_link": 1, "watch_region": 1, "watch_fetched_at": 1},
-        )
+        existing = await movies.find_one({"_id": f"{mt}:{int(tmdb_id)}"}, {"watch_providers": 1, "watch_link": 1, "watch_region": 1, "watch_fetched_at": 1})
         if existing:
             fetched = int(existing.get("watch_fetched_at", 0) or 0)
-            if (
-                existing.get("watch_region") == region
-                and now_ts() - fetched <= WATCH_CACHE_HOURS * 3600
-            ):
+            if existing.get("watch_region") == region and now_ts() - fetched <= WATCH_CACHE_HOURS * 3600:
                 return list(existing.get("watch_providers") or []), existing.get("watch_link")
-
     try:
         provider_doc = await tmdb_watch_providers(mt, tmdb_id, region)
         names, link = provider_names(provider_doc, region)
     except Exception as exc:
         log.warning("watch provider lookup failed %s:%s: %s", mt, tmdb_id, exc)
         names, link = [], None
-
-    await movies.update_one(
-        {"_id": f"{mt}:{int(tmdb_id)}"},
-        {
-            "$set": {
-                "watch_providers": names,
-                "watch_link": link or watch_page_url(mt, tmdb_id),
-                "watch_region": region,
-                "watch_fetched_at": now_ts(),
-            }
-        },
-        upsert=True,
-    )
-    return names, link or watch_page_url(mt, tmdb_id)
+    await movies.update_one({"_id": f"{mt}:{int(tmdb_id)}"}, {"$set": {"watch_providers": names, "watch_link": link, "watch_region": region, "watch_fetched_at": now_ts()}}, upsert=True)
+    return names, link
 
 
-async def publish_canonical(details: dict, mt: str, caption: str, settings: dict, watch_link: str) -> Optional[int]:
+async def publish_canonical(details: dict, mt: str, caption: str, settings: dict, watch_link: Optional[str]) -> tuple[Optional[str], Optional[int], Optional[str]]:
     if not settings.get("canonical_cache_enabled", True):
-        return None
-    result_channel = str(settings.get("result_channel") or "").strip()
-    if not result_channel:
-        return None
+        return None, None, None
+    target = str(settings.get("result_channel") or "").strip()
+    if not target:
+        return None, None, "RESULT_CHANNEL_NOT_SET"
     try:
+        chat = await app.get_chat(target)
         markup = await movie_keyboard(details, mt, settings, watch_link)
         poster = details.get("poster_path")
         if poster:
-            msg = await app.send_photo(
-                result_channel,
-                photo=f"{MOVIE_IMAGE_BASE}{poster}",
-                caption=caption[:1024],
-                reply_markup=markup,
-            )
+            msg = await app.send_photo(chat.id, photo=f"{MOVIE_IMAGE_BASE}{poster}", caption=caption[:1024], reply_markup=markup)
         else:
-            msg = await app.send_message(
-                result_channel,
-                caption[:4096],
-                reply_markup=markup,
-            )
-        return int(msg.id)
+            msg = await app.send_message(chat.id, caption[:4096], reply_markup=markup)
+        log.info("CANONICAL_PUBLISH_OK channel=%s msg=%s title=%s", chat.id, msg.id, title_of(details, mt))
+        return str(chat.id), int(msg.id), None
     except Exception as exc:
-        log.warning("canonical publish failed: %s", exc)
-        return None
+        error = f"{type(exc).__name__}: {str(exc)[:220]}"
+        log.error("CANONICAL_PUBLISH_FAIL target=%s error=%s", target, error)
+        return None, None, error
 
 
 async def cache_details(details: dict, mt: str, *, force_watch: bool = False, publish: bool = True) -> dict:
     settings = await get_settings()
     region = (settings.get("watch_region") or TMDB_REGION).upper()
     providers, watch_link = await get_watch_data(mt, int(details["id"]), region, force=force_watch)
-    caption = format_caption(details, mt, providers, region)
+    caption = format_caption(details, mt, providers, region, settings)
     doc_id = f"{mt}:{int(details['id'])}"
     old = await movies.find_one({"_id": doc_id}, {"canonical_message_id": 1})
     canonical_id = old.get("canonical_message_id") if old else None
 
+    canonical_chat_id = old.get("canonical_chat_id") if old else None
+    canonical_error = None
     if publish and not canonical_id:
-        canonical_id = await publish_canonical(details, mt, caption, settings, watch_link)
+        canonical_chat_id, canonical_id, canonical_error = await publish_canonical(details, mt, caption, settings, watch_link)
 
     title = title_of(details, mt)
     original = details.get("original_title") if mt == "movie" else details.get("original_name")
@@ -780,6 +736,8 @@ async def cache_details(details: dict, mt: str, *, force_watch: bool = False, pu
         "caption": caption,
         "details": details,
         "canonical_message_id": canonical_id,
+        "canonical_chat_id": canonical_chat_id,
+        "canonical_publish_error": canonical_error,
         "watch_providers": providers,
         "watch_link": watch_link,
         "watch_region": region,
@@ -803,30 +761,41 @@ async def find_cached(query: str, mode: str = "search") -> Optional[dict]:
     return doc
 
 
-async def send_cached(uid: int, doc: dict) -> None:
-    canonical = doc.get("canonical_message_id")
+async def ensure_canonical_for_doc(doc: dict) -> dict:
+    """Retry canonical channel publish when an earlier attempt failed or channel was configured later."""
     settings = await get_settings()
-    result_channel = str(settings.get("result_channel") or "").strip()
-    if canonical and result_channel:
+    if not settings.get("canonical_cache_enabled", True):
+        return doc
+    if doc.get("canonical_message_id") and doc.get("canonical_chat_id"):
+        return doc
+    details = doc.get("details") or {}
+    mt = doc.get("media_type") or "movie"
+    if not details.get("id"):
+        return doc
+    refreshed = await cache_details(details, mt, publish=True)
+    return refreshed
+
+
+async def send_cached(uid: int, doc: dict) -> None:
+    settings = await get_settings()
+    with contextlib.suppress(Exception):
+        doc = await ensure_canonical_for_doc(doc)
+    canonical = doc.get("canonical_message_id")
+    canonical_chat = doc.get("canonical_chat_id")
+    if canonical and canonical_chat:
         try:
-            await app.copy_message(uid, result_channel, int(canonical))
+            await app.copy_message(uid, str(canonical_chat), int(canonical))
             await bump("cache_hits")
             return
         except Exception:
-            log.exception("canonical copy failed; using cached metadata")
-
+            log.exception("canonical copy failed; falling back to cached metadata")
     details = doc.get("details") or {}
     mt = doc.get("media_type") or "movie"
     markup = await movie_keyboard(details, mt, settings, doc.get("watch_link"))
     poster = doc.get("poster_path")
     if poster:
         try:
-            await app.send_photo(
-                uid,
-                f"{MOVIE_IMAGE_BASE}{poster}",
-                caption=(doc.get("caption") or "Movie found.")[:1024],
-                reply_markup=markup,
-            )
+            await app.send_photo(uid, f"{MOVIE_IMAGE_BASE}{poster}", caption=(doc.get("caption") or "Movie found.")[:1024], reply_markup=markup)
             return
         except Exception:
             log.exception("cached poster send failed")
@@ -876,15 +845,10 @@ def home_keyboard(settings: dict) -> InlineKeyboardMarkup:
     rows = [
         [InlineKeyboardButton("🔎 SEARCH MOVIE", callback_data="search_help")],
         [InlineKeyboardButton("🆕 UPCOMING", callback_data="upcoming_help"), InlineKeyboardButton("✅ RELEASED", callback_data="released_help")],
-        [InlineKeyboardButton("💎 REFERRAL", callback_data="referral")],
-        [InlineKeyboardButton("🤖 BOT STATUS", callback_data="status")],
+        [InlineKeyboardButton("💎 REFERRAL", callback_data="referral"), InlineKeyboardButton("🤖 BOT STATUS", callback_data="status")],
     ]
-    if settings.get("promo_enabled", True):
-        for i in range(1, 4):
-            text = (settings.get(f"promo_{i}_text") or "").strip()
-            url = (settings.get(f"promo_{i}_url") or "").strip()
-            if text and url:
-                rows.append([InlineKeyboardButton(text[:64], url=url)])
+    rows.extend(brand_button_rows(settings))
+    rows.append([InlineKeyboardButton("ℹ️ CREDITS", callback_data="credits")])
     return InlineKeyboardMarkup(rows)
 
 
@@ -903,8 +867,8 @@ def admin_keyboard(settings: dict) -> InlineKeyboardMarkup:
         [toggle_button(settings, "canonical_cache_enabled", "Channel Cache"), toggle_button(settings, "referral_enabled", "Referral")],
         [toggle_button(settings, "analytics_enabled", "Analytics"), toggle_button(settings, "broadcast_enabled", "Broadcast")],
         [toggle_button(settings, "seeder_enabled", "Auto Seeder"), toggle_button(settings, "maintenance_mode", "Maintenance")],
-        [toggle_button(settings, "promo_enabled", "Promotions"), toggle_button(settings, "seed_catalog_enabled", "Catalog Seed")],
-        [InlineKeyboardButton("⚙️ LINKS / CHANNELS", callback_data="admin_links")],
+        [toggle_button(settings, "seed_catalog_enabled", "Catalog Seed")],
+        [InlineKeyboardButton("⚙️ CHANNELS / BRANDING", callback_data="admin_links")],
         [InlineKeyboardButton("🌱 SEEDER", callback_data="admin_seeder"), InlineKeyboardButton("📊 ANALYTICS", callback_data="admin_analytics")],
         [InlineKeyboardButton("👥 USERS", callback_data="admin_users"), InlineKeyboardButton("📁 CACHE", callback_data="admin_cache")],
         [InlineKeyboardButton("📢 BROADCAST", callback_data="admin_broadcast")],
@@ -914,7 +878,6 @@ def admin_keyboard(settings: dict) -> InlineKeyboardMarkup:
 
 async def admin_panel_text(settings: dict) -> str:
     result_channel = settings.get("result_channel") or "Not set"
-    website = settings.get("website_url") or "Not set"
     return (
         "👑 <b>MASTER MOVIE ADMIN</b>\n\n"
         f"🔎 Search: {'ON' if settings.get('movie_search_enabled') else 'OFF'}\n"
@@ -926,7 +889,7 @@ async def admin_panel_text(settings: dict) -> str:
         f"🛠 Maintenance: {'ON' if settings.get('maintenance_mode') else 'OFF'}\n\n"
         f"🌍 Watch Region: <b>{esc(settings.get('watch_region') or TMDB_REGION)}</b>\n"
         f"📺 Result Channel: <code>{esc(result_channel)}</code>\n"
-        f"🌐 Website: <code>{esc(website)}</code>\n\n"
+        f"🏷️ Brand: <b>{esc(settings.get('brand_name') or BRAND_NAME)}</b>\n\n"
         "Use the buttons below to change settings without redeploying."
     )
 
@@ -951,7 +914,6 @@ async def process_search(message, query: str, mode: str = "search"):
     if await is_banned(uid) and not is_admin(uid):
         return await message.reply_text("🚫 You are banned from this bot.")
     s = await get_settings()
-
     if mode == "search" and not s.get("movie_search_enabled", True):
         return await message.reply_text("❌ Movie Search is disabled by admin.")
     if mode == "released" and not s.get("released_enabled", True):
@@ -961,19 +923,14 @@ async def process_search(message, query: str, mode: str = "search"):
     if await maintenance_block(message):
         return
     if not await join_ok(uid):
-        return await message.reply_text(
-            "🔐 <b>Join required channel(s) first.</b>",
-            reply_markup=join_keyboard(s),
-        )
-
+        return await message.reply_text("🔐 <b>Join required channel(s) first.</b>", reply_markup=join_keyboard(s))
     query = (query or "").strip()
     if not query:
         return await message.reply_text("Usage: <code>/search movie name</code>")
-
     cached = await find_cached(query, mode)
     if cached:
+        await bump("searches")
         return await send_cached(uid, cached)
-
     status = await message.reply_text("🔎 <b>Searching…</b>")
     try:
         results = await tmdb_search(query)
@@ -981,8 +938,7 @@ async def process_search(message, query: str, mode: str = "search"):
             results = [x for x in results if is_released(x)]
         elif mode == "upcoming":
             results = [x for x in results if is_upcoming(x)]
-
-        # Only use AI if initial TMDB search is empty.
+        fixed = None
         if not results:
             fixed = await corrected_query(query)
             if fixed and norm_query(fixed) != norm_query(query):
@@ -991,49 +947,49 @@ async def process_search(message, query: str, mode: str = "search"):
                     results = [x for x in results if is_released(x)]
                 elif mode == "upcoming":
                     results = [x for x in results if is_upcoming(x)]
-
         if not results:
-            return await status.edit_text("❌ No matching movie/series found. Try another spelling.")
-
+            suggestion = fixed or query
+            token = f"{uid}_{int(time.time()*1000)}"
+            suggestion_state[token] = {"uid": uid, "text": suggestion, "expires": now_ts() + 600}
+            google = "https://www.google.com/search?q=" + __import__("urllib.parse", fromlist=["quote"]).quote(suggestion)
+            return await status.edit_text(
+                "❌ <b>No matching title found.</b>\n\n"
+                f"💡 <b>Suggested spelling:</b> <code>{esc(suggestion)}</code>\n\n"
+                "Choose one:",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("✅ SEARCH SUGGESTION", callback_data=f"suggest:{token}")],
+                    [InlineKeyboardButton("🔎 GOOGLE — CHECK SPELLING", url=google)],
+                ]),
+            )
         order = await rank_candidates(query, results)
-        ordered = [results[i - 1] for i in order if 1 <= i <= len(results)] or results
-
-        # Direct result for a confident winner.
-        if len(ordered) == 1:
+        ordered = [results[i-1] for i in order if 1 <= i <= len(results)] or results
+        top_score = heuristic_score(query, ordered[0])
+        second_score = heuristic_score(query, ordered[1]) if len(ordered) > 1 else 0.0
+        confident = len(ordered) == 1 or (top_score >= 0.93 and top_score - second_score >= 0.14)
+        if confident:
             item = ordered[0]
             details = await tmdb_details(item["media_type"], int(item["id"]))
             doc = await cache_details(details, item["media_type"], publish=True)
-            await status.delete()
+            with contextlib.suppress(Exception):
+                await status.delete()
             await send_cached(uid, doc)
             await bump("searches")
             return
-
-        # Show user selectable candidates.
         rows = []
         for item in ordered[:SEARCH_LIMIT]:
             mt = item.get("media_type")
             date = release_of(item, mt) or "----"
             icon = "🎬" if mt == "movie" else "📺"
             label = f"{icon} {title_of(item, mt)[:42]} ({date[:4] or '----'})"
-            rows.append([
-                InlineKeyboardButton(
-                    label,
-                    callback_data=f"pick:{mt}:{int(item['id'])}",
-                )
-            ])
+            rows.append([InlineKeyboardButton(label, callback_data=f"pick:{mt}:{int(item['id'])}")])
         rows.append([InlineKeyboardButton("❌ Close", callback_data="close")])
-        await status.edit_text(
-            "🎯 <b>Which title did you mean?</b>\n\nSelect the correct one:",
-            reply_markup=InlineKeyboardMarkup(rows),
-        )
-        search_state = getattr(message, "_movie_search_state", None)
-        _ = search_state  # state is intentionally carried in callback data, not memory.
+        await status.edit_text("🎯 <b>Which title did you mean?</b>\n\nSelect the correct one:", reply_markup=InlineKeyboardMarkup(rows))
         await bump("searches")
     except Exception as exc:
         log.exception("search failed")
         message_text = str(exc)
         if "TMDB_AUTH_ERROR" in message_text:
-            message_text = "TMDB credential invalid. Check TMDB_API_TOKEN/API_KEY in Render Environment."
+            message_text = "TMDB credential invalid. Check TMDB_API_TOKEN/TMDB_API_KEY in Render Environment."
         elif "TMDB_RATE_LIMIT" in message_text:
             message_text = "TMDB rate limit reached. Please try again shortly."
         await status.edit_text(f"❌ Search failed.\n\n<code>{esc(message_text)[:900]}</code>")
@@ -1103,8 +1059,8 @@ async def seed_once() -> dict:
         for item in candidates:
             mt = item.get("media_type") or source[2]
             doc_id = f"{mt}:{int(item['id'])}"
-            exists = await movies.find_one({"_id": doc_id}, {"_id": 1})
-            if not exists:
+            exists = await movies.find_one({"_id": doc_id}, {"_id": 1, "canonical_message_id": 1})
+            if not exists or not exists.get("canonical_message_id"):
                 fresh.append(item)
             if len(fresh) >= batch:
                 break
@@ -1203,19 +1159,19 @@ async def start_cmd(client, message):
     )
 
 
-@app.on_message(filters.command("search") & filters.private)
+@app.on_message(filters.command("search") & (filters.private | filters.group))
 async def search_cmd(client, message):
     await ensure_user(message.from_user)
     await process_search(message, " ".join(message.command[1:]), "search")
 
 
-@app.on_message(filters.command("upcoming") & filters.private)
+@app.on_message(filters.command("upcoming") & (filters.private | filters.group))
 async def upcoming_cmd(client, message):
     await ensure_user(message.from_user)
     await process_search(message, " ".join(message.command[1:]), "upcoming")
 
 
-@app.on_message(filters.command("released") & filters.private)
+@app.on_message(filters.command("released") & (filters.private | filters.group))
 async def released_cmd(client, message):
     await ensure_user(message.from_user)
     await process_search(message, " ".join(message.command[1:]), "released")
@@ -1227,7 +1183,7 @@ async def released_cmd(client, message):
     & ~filters.command([
         "start", "search", "upcoming", "released", "admin", "stats", "ban", "unban",
         "broadcast", "maintenance", "ping", "diagnose", "seednow", "seedadd", "seedlist",
-        "seedclear", "seedstatus", "cancel",
+        "seedclear", "seedstatus", "channel_test", "setresultchannel", "cancel",
     ])
 )
 async def plain_search(client, message):
@@ -1328,6 +1284,35 @@ async def callbacks(client, query):
             return await query.answer("🛠 Bot is under maintenance.", show_alert=True)
         return await query.answer("✅ Movie Search Bot is active.", show_alert=True)
 
+    if data == "credits":
+        return await query.message.edit_text(
+            "ℹ️ <b>Credits</b>\n\n"
+            "This product uses the TMDB API but is not endorsed or certified by TMDB.\n\n"
+            "Watch-availability information is powered by JustWatch via TMDB and is shown as provided by the API.\n\n"
+            f"🏷️ <b>{esc(settings.get('brand_name') or BRAND_NAME)}</b>",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back", callback_data="home_back")]]),
+        )
+
+    if data == "home_back":
+        return await query.message.edit_text(
+            f"🏠 <b>{esc(settings.get('brand_name') or BRAND_NAME)}</b>",
+            reply_markup=home_keyboard(settings),
+        )
+
+    if data == "channel_test":
+        target = str(settings.get("result_channel") or "").strip()
+        if not target:
+            return await query.answer("Result channel is not configured.", show_alert=True)
+        try:
+            chat = await app.get_chat(target)
+            test = await app.send_message(chat.id, "🧪 <b>Movie result channel test</b>\n✅ Bot can post here.")
+            with contextlib.suppress(Exception):
+                await app.delete_messages(chat.id, test.id)
+            return await query.answer(f"✅ Channel OK: {chat.id}", show_alert=True)
+        except Exception as exc:
+            log.error("Result channel test failed: %s", exc)
+            return await query.answer(f"❌ {type(exc).__name__}: {str(exc)[:180]}", show_alert=True)
+
     if data == "search_help":
         return await query.message.edit_text(
             "🔎 <b>Search</b>\n\n"
@@ -1361,6 +1346,18 @@ async def callbacks(client, query):
             reply_markup=home_keyboard(settings),
         )
 
+    if data.startswith("suggest:"):
+        token = data.split(":", 1)[1]
+        item = suggestion_state.get(token)
+        if not item or int(item.get("uid", 0)) != uid or int(item.get("expires", 0)) < now_ts():
+            suggestion_state.pop(token, None)
+            return await query.answer("Suggestion expired. Search again.", show_alert=True)
+        suggestion_state.pop(token, None)
+        with contextlib.suppress(Exception):
+            await query.message.delete()
+        await process_search(query.message, item["text"], "search")
+        return await query.answer("Searching corrected spelling…")
+
     if data.startswith("pick:"):
         if not await join_ok(uid) and not is_admin(uid):
             return await query.answer("Join required channels first.", show_alert=True)
@@ -1393,17 +1390,16 @@ async def callbacks(client, query):
 
     if data == "admin_links":
         return await query.message.edit_text(
-            "⚙️ <b>LINKS / CHANNELS</b>\n\n"
-            "Choose what to edit:\n\n"
-            "Join Channel values should be the channel username or numeric chat ID.\n"
-            "Use <code>value | url</code> when prompted.",
+            "⚙️ <b>CHANNELS / BRANDING</b>\n\n"
+            "Configure result channel, join gates and your own branded links.",
             reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("Join 01", callback_data="cfg:join1"), InlineKeyboardButton("Join 02", callback_data="cfg:join2")],
-                [InlineKeyboardButton("Result Channel", callback_data="cfg:result_channel")],
-                [InlineKeyboardButton("Website", callback_data="cfg:website")],
-                [InlineKeyboardButton("Watch Region", callback_data="cfg:watch_region")],
-                [InlineKeyboardButton("Promo 1", callback_data="cfg:promo1"), InlineKeyboardButton("Promo 2", callback_data="cfg:promo2")],
-                [InlineKeyboardButton("Promo 3", callback_data="cfg:promo3")],
+                [InlineKeyboardButton("📺 Result Channel", callback_data="cfg:result_channel")],
+                [InlineKeyboardButton("🔐 Join Channel 01", callback_data="cfg:join1"), InlineKeyboardButton("🔐 Join Channel 02", callback_data="cfg:join2")],
+                [InlineKeyboardButton("🌍 Watch Region", callback_data="cfg:watch_region")],
+                [InlineKeyboardButton("🏷️ Brand Name", callback_data="cfg:brand_name")],
+                [InlineKeyboardButton("📢 Brand Telegram", callback_data="cfg:brand_channel"), InlineKeyboardButton("📸 Instagram", callback_data="cfg:brand_instagram")],
+                [InlineKeyboardButton("🤖 Brand Bot", callback_data="cfg:brand_bot")],
+                [InlineKeyboardButton("🧪 RESULT CHANNEL TEST", callback_data="channel_test")],
                 [InlineKeyboardButton("🔙 Admin", callback_data="admin_back")],
             ]),
         )
@@ -1414,13 +1410,16 @@ async def callbacks(client, query):
         hints = {
             "join1": "Send: <code>CHANNEL_ID_OR_USERNAME | JOIN_URL</code>",
             "join2": "Send: <code>CHANNEL_ID_OR_USERNAME | JOIN_URL</code>",
-            "result_channel": "Send private/public result channel ID or username, e.g. <code>-1001234567890</code>",
-            "website": "Send website base URL, e.g. <code>https://example.com</code> or <code>off</code>",
-            "watch_region": "Send ISO-3166-1 region, e.g. <code>IN</code>, <code>US</code>, <code>GB</code>",
-            "promo1": "Send: <code>BUTTON TEXT | URL</code> or <code>off</code>",
-            "promo2": "Send: <code>BUTTON TEXT | URL</code> or <code>off</code>",
-            "promo3": "Send: <code>BUTTON TEXT | URL</code> or <code>off</code>",
+            "result_channel": "Send result channel ID/username. The bot must be an administrator with permission to post.",
+            "watch_region": "Send 2-letter region, e.g. <code>IN</code>, <code>US</code>, <code>GB</code>.",
+            "brand_name": "Send your brand name.",
+            "brand_channel": "Send your Telegram channel/profile URL or <code>off</code>.",
+            "brand_instagram": "Send your Instagram URL or <code>off</code>.",
+            "brand_bot": "Send your Telegram bot URL or <code>off</code>.",
         }
+        if query.message.chat.type != "private":
+            admin_input_state.pop(uid, None)
+            return await query.answer("Open the bot privately to edit this setting.", show_alert=True)
         return await query.message.edit_text(
             f"✏️ <b>Edit {esc(key)}</b>\n\n{hints.get(key, 'Send the value now.')}\n\nUse /cancel to abort."
         )
@@ -1492,10 +1491,23 @@ async def callbacks(client, query):
         return await query.message.edit_text(await admin_panel_text(settings), reply_markup=admin_keyboard(settings))
 
 
+@app.on_message(filters.command("panel") & (filters.private | filters.group))
+async def panel_cmd(client, message):
+    uid = int(message.from_user.id)
+    settings = await get_settings()
+    if settings.get("maintenance_mode") and not is_admin(uid):
+        return await message.reply_text("🛠 <b>Bot is under maintenance.</b>")
+    await message.reply_text(
+        f"👤 <b>{esc(settings.get('brand_name') or BRAND_NAME)} — User Panel</b>\n\n"
+        "Use buttons below or /search Movie Name.",
+        reply_markup=home_keyboard(settings),
+    )
+
+
 # ============================================================
 # ADMIN COMMANDS + ADMIN INPUT STATE
 # ============================================================
-@app.on_message(filters.command("admin") & filters.private)
+@app.on_message(filters.command("admin") & (filters.private | filters.group))
 async def admin_cmd(client, message):
     if not is_admin(message.from_user.id):
         return
@@ -1503,7 +1515,7 @@ async def admin_cmd(client, message):
     await message.reply_text(await admin_panel_text(settings), reply_markup=admin_keyboard(settings))
 
 
-@app.on_message(filters.command("stats") & filters.private)
+@app.on_message(filters.command("stats") & (filters.private | filters.group))
 async def stats_cmd(client, message):
     if not is_admin(message.from_user.id):
         return
@@ -1521,7 +1533,7 @@ async def stats_cmd(client, message):
     )
 
 
-@app.on_message(filters.command("ban") & filters.private)
+@app.on_message(filters.command("ban") & (filters.private | filters.group))
 async def ban_cmd(client, message):
     if not is_admin(message.from_user.id):
         return
@@ -1535,7 +1547,7 @@ async def ban_cmd(client, message):
     await message.reply_text(f"🚫 Banned <code>{uid}</code>")
 
 
-@app.on_message(filters.command("unban") & filters.private)
+@app.on_message(filters.command("unban") & (filters.private | filters.group))
 async def unban_cmd(client, message):
     if not is_admin(message.from_user.id):
         return
@@ -1549,7 +1561,7 @@ async def unban_cmd(client, message):
     await message.reply_text(f"✅ Unbanned <code>{uid}</code>")
 
 
-@app.on_message(filters.command("maintenance") & filters.private)
+@app.on_message(filters.command("maintenance") & (filters.private | filters.group))
 async def maintenance_cmd(client, message):
     if not is_admin(message.from_user.id):
         return
@@ -1616,7 +1628,7 @@ async def do_broadcast(text: str) -> tuple[int, int]:
     return sent, failed
 
 
-@app.on_message(filters.command("seedadd") & filters.private)
+@app.on_message(filters.command("seedadd") & (filters.private | filters.group))
 async def seedadd_cmd(client, message):
     if not is_admin(message.from_user.id):
         return
@@ -1631,7 +1643,7 @@ async def seedadd_cmd(client, message):
     await message.reply_text(f"✅ Added to seed queue. Queue size: <b>{len(queue)}</b>")
 
 
-@app.on_message(filters.command("seedlist") & filters.private)
+@app.on_message(filters.command("seedlist") & (filters.private | filters.group))
 async def seedlist_cmd(client, message):
     if not is_admin(message.from_user.id):
         return
@@ -1643,7 +1655,7 @@ async def seedlist_cmd(client, message):
     await message.reply_text(text)
 
 
-@app.on_message(filters.command("seedclear") & filters.private)
+@app.on_message(filters.command("seedclear") & (filters.private | filters.group))
 async def seedclear_cmd(client, message):
     if not is_admin(message.from_user.id):
         return
@@ -1651,7 +1663,7 @@ async def seedclear_cmd(client, message):
     await message.reply_text("✅ Seed queue cleared.")
 
 
-@app.on_message(filters.command("seednow") & filters.private)
+@app.on_message(filters.command("seednow") & (filters.private | filters.group))
 async def seednow_cmd(client, message):
     if not is_admin(message.from_user.id):
         return
@@ -1664,7 +1676,7 @@ async def seednow_cmd(client, message):
     )
 
 
-@app.on_message(filters.command("seedstatus") & filters.private)
+@app.on_message(filters.command("seedstatus") & (filters.private | filters.group))
 async def seedstatus_cmd(client, message):
     if not is_admin(message.from_user.id):
         return
@@ -1682,12 +1694,40 @@ async def seedstatus_cmd(client, message):
     )
 
 
-@app.on_message(filters.command("ping") & filters.private)
+@app.on_message(filters.command("setresultchannel") & (filters.private | filters.group))
+async def setresultchannel_cmd(client, message):
+    if not is_admin(message.from_user.id):
+        return
+    value = " ".join(message.command[1:]).strip()
+    if not value:
+        return await message.reply_text("Usage: /setresultchannel @channelusername or -1001234567890")
+    await set_setting("result_channel", value)
+    await message.reply_text("✅ Result channel saved. Run /channel_test now.")
+
+
+@app.on_message(filters.command("channel_test") & (filters.private | filters.group))
+async def channel_test_cmd(client, message):
+    if not is_admin(message.from_user.id):
+        return
+    target = str((await get_settings()).get("result_channel") or "").strip()
+    if not target:
+        return await message.reply_text("❌ Result channel is not configured. Use /setresultchannel ...")
+    try:
+        chat = await client.get_chat(target)
+        test = await client.send_message(chat.id, "✅ <b>Movie Search Bot channel test</b>\n\nThe bot can post here.")
+        with contextlib.suppress(Exception):
+            await client.delete_messages(chat.id, test.id)
+        await message.reply_text(f"✅ Channel OK\nID: <code>{chat.id}</code>\nTitle: <b>{esc(getattr(chat, 'title', '') or '')}</b>")
+    except Exception as exc:
+        await message.reply_text(f"❌ Channel test failed\n<code>{esc(type(exc).__name__)}: {esc(str(exc)[:1200])}</code>")
+
+
+@app.on_message(filters.command("ping") & (filters.private | filters.group))
 async def ping_cmd(client, message):
     await message.reply_text("🏓 <b>PONG</b>\n\n✅ Movie Search Bot is online.")
 
 
-@app.on_message(filters.command("diagnose") & filters.private)
+@app.on_message(filters.command("diagnose") & (filters.private | filters.group))
 async def diagnose_cmd(client, message):
     if not is_admin(message.from_user.id):
         return
@@ -1704,6 +1744,14 @@ async def diagnose_cmd(client, message):
         bot_name = me.username or str(me.id)
     except Exception:
         bot_name = "unknown"
+    result_channel = str(s.get("result_channel") or "").strip()
+    channel_status = "NOT SET"
+    if result_channel:
+        try:
+            ch = await client.get_chat(result_channel)
+            channel_status = f"OK: {ch.id} / {getattr(ch, 'title', '') or ''}"
+        except Exception as exc:
+            channel_status = f"ERROR: {type(exc).__name__}: {str(exc)[:100]}"
 
     await message.reply_text(
         "🩺 <b>MOVIE BOT DIAGNOSTICS</b>\n\n"
@@ -1719,8 +1767,13 @@ async def diagnose_cmd(client, message):
         f"Join Gate: {'ON' if s.get('join_gate_enabled') else 'OFF'}\n"
         f"Auto Seeder: {'ON' if s.get('seeder_enabled') else 'OFF'}\n"
         f"Watch Region: <b>{esc(s.get('watch_region'))}</b>\n"
-        f"Result Channel: <code>{esc(s.get('result_channel') or 'NOT SET')}</code>\n"
-        f"Website: <code>{esc(s.get('website_url') or 'NOT SET')}</code>"
+        f"Result Channel: <code>{esc(result_channel or 'NOT SET')}</code>\n"
+        f"Channel Check: <b>{esc(channel_status)}</b>\n"
+        f"Brand: <b>{esc(s.get('brand_name') or BRAND_NAME)}</b>\n"
+        f"Brand Telegram: {'SET' if s.get('brand_channel_url') else 'OFF'}\n"
+        f"Brand Bot: {'SET' if s.get('brand_bot_url') else 'OFF'}\n"
+        f"Brand Instagram: {'SET' if s.get('brand_instagram_url') else 'OFF'}\n"
+        f"Free Watch Link: provider-only"
     )
 
 
@@ -1769,11 +1822,6 @@ async def admin_input_handler(client, message):
             await set_setting("result_channel", text)
             msg = "✅ Result channel saved. Make sure the bot can post there."
 
-        elif key == "website":
-            value = "" if text.lower() == "off" else text.rstrip("/")
-            await set_setting("website_url", value)
-            msg = "✅ Website updated."
-
         elif key == "watch_region":
             region = text.upper().strip()
             if not re.fullmatch(r"[A-Z]{2}", region):
@@ -1781,19 +1829,17 @@ async def admin_input_handler(client, message):
             await set_setting("watch_region", region)
             msg = f"✅ Watch region set to <b>{region}</b>."
 
-        elif key.startswith("promo"):
-            num = key[-1]
-            if text.lower() == "off":
-                await set_setting(f"promo_{num}_text", "")
-                await set_setting(f"promo_{num}_url", "")
-                msg = f"✅ Promo {num} disabled."
-            else:
-                parts = [x.strip() for x in text.split("|", 1)]
-                if len(parts) != 2 or not parts[0] or not parts[1].startswith(("http://", "https://", "tg://")):
-                    return await message.reply_text("Format: <code>BUTTON TEXT | https://example.com</code>")
-                await set_setting(f"promo_{num}_text", parts[0][:64])
-                await set_setting(f"promo_{num}_url", parts[1])
-                msg = f"✅ Promo {num} saved."
+        elif key == "brand_name":
+            await set_setting("brand_name", text[:80] or BRAND_NAME)
+            msg = "✅ Brand name saved."
+
+        elif key in {"brand_channel", "brand_instagram", "brand_bot"}:
+            field = {"brand_channel": "brand_channel_url", "brand_instagram": "brand_instagram_url", "brand_bot": "brand_bot_url"}[key]
+            value = "" if text.lower() == "off" else text
+            if value and not value.startswith(("http://", "https://", "tg://")):
+                return await message.reply_text("Use a valid http(s):// or tg:// URL, or <code>off</code>.")
+            await set_setting(field, value)
+            msg = "✅ Branding link saved."
 
         elif key == "broadcast":
             admin_input_state.pop(uid, None)
@@ -1877,7 +1923,8 @@ async def main():
         except Exception as exc:
             log.warning("MongoDB ping failed: %s", exc)
 
-        seed_task = asyncio.create_task(seeder_loop(stop_event), name="movie-seeder")
+        if (await get_settings()).get("seeder_enabled", False):
+            seed_task = asyncio.create_task(seeder_loop(stop_event), name="movie-seeder")
         await idle()
     except FloodWait as exc:
         log.error("Telegram FloodWait during startup: %s sec", exc.value)
