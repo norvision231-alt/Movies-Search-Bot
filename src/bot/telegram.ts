@@ -59,6 +59,7 @@ const createSeoHashtags = (media: any, langName: string): string => {
   return [cleanTitle ? `#${cleanTitle}` : '', year ? `#Release${year}` : '', langTag ? `#${langTag}` : '', typeTag, genreTags, '#HDMovies'].filter(Boolean).join(' ');
 };
 
+// Clean Caption with Embedded Text Links Only (No duplicate bottom buttons)
 export const formatCaption = (media: any, settings: any): string => {
   const title = escapeHtml(media.title || 'Untitled');
   const year = media.releaseDate ? escapeHtml(String(media.releaseDate).substring(0, 4)) : 'N/A';
@@ -87,17 +88,17 @@ export const formatCaption = (media: any, settings: any): string => {
   const shortOverview =
     descSource.length > 250 ? `${escapeHtml(descSource.substring(0, 247))}...` : escapeHtml(descSource);
 
-  const c1 = settings?.channel01Url || 'https://t.me/yourchannel1';
-  const c2 = settings?.channel02Url || 'https://t.me/yourchannel2';
-  const prem = settings?.premiumUrl || c1;
-  const adult = settings?.adultContentUrl || c2;
+  const c1 = (settings?.channel01Url || 'https://t.me/yourchannel1').trim();
+  const c2 = (settings?.channel02Url || 'https://t.me/yourchannel2').trim();
+  const prem = (settings?.premiumUrl || c1).trim();
+  const adult = (settings?.adultContentUrl || c2).trim();
   const ourRating = String(settings?.ourRating || '4.7/5').trim();
 
   const lines: string[] = [`🔥 <b>${title}</b> (${year})`];
   if (media.imdbRating) {
     lines.push(`⭐ <b>IMDb:</b> ${escapeHtml(String(media.imdbRating))}`);
   } else if (media.imdbId) {
-    lines.push(`⭐ <b>IMDb:</b> <a href="https://www.imdb.com/title/${escapeHtml(media.imdbId)}/">Verified on IMDb</a>`);
+    lines.push(`⭐ <b>IMDb:</b> <a href="https://www.imdb.com/title/${escapeHtml(media.imdbId)}/"><b>Verified on IMDb</b></a>`);
   }
   if (media.rtRating) {
     lines.push(`🍅 <b>RT Audience:</b> ${escapeHtml(String(media.rtRating))}`);
@@ -117,30 +118,23 @@ export const formatCaption = (media: any, settings: any): string => {
 
   lines.push(
     '',
-    shortOverview,
+    `<i>${shortOverview}</i>`,
     '━━━━━━━━━━━━━━',
-    `🔗 <b>JOIN CHANNEL 01:</b> 👉 <a href="${escapeHtml(c1)}">JOIN NOW</a>`,
-    `🔗 <b>JOIN CHANNEL 02:</b> 👉 <a href="${escapeHtml(c2)}">JOIN NOW</a>`,
+    `🔗 <b>JOIN CHANNEL 01:</b> 👉 <a href="${escapeHtml(c1)}"><b>JOIN NOW</b></a>`,
+    `🔗 <b>JOIN CHANNEL 02:</b> 👉 <a href="${escapeHtml(c2)}"><b>JOIN NOW</b></a>`,
     `💎 <a href="${escapeHtml(prem)}"><b>JOIN PREMIUM CONTENT</b></a>`,
     '━━━━━━━━━━━━━━',
     `🔞 <a href="${escapeHtml(adult)}"><b>18+ CONTENT ONLY</b></a>`,
-    '⚠️ Adults only where applicable. Viewer discretion advised.',
+    '⚠️ <i>Adults only where applicable. Viewer discretion advised.</i>',
     '',
     escapeHtml(createSeoHashtags(media, langDisplay))
   );
   return lines.join('\n');
 };
 
-export const buildPostKeyboard = (settings: any) => {
-  const c1 = settings?.channel01Url || 'https://t.me/yourchannel1';
-  const c2 = settings?.channel02Url || 'https://t.me/yourchannel2';
-  const prem = settings?.premiumUrl || c1;
-  const adult = settings?.adultContentUrl || c2;
-  return Markup.inlineKeyboard([
-    [Markup.button.url('🔗 JOIN CHANNEL 01', c1), Markup.button.url('🔗 JOIN CHANNEL 02', c2)],
-    [Markup.button.url('💎 JOIN PREMIUM CONTENT', prem)],
-    [Markup.button.url('🔞 18+ CONTENT ONLY', adult)]
-  ]);
+// Returns empty object so no duplicate inline buttons appear below posts
+export const buildPostKeyboard = (_settings: any): Record<string, any> => {
+  return {};
 };
 
 export const sendToLogChannel = async (message: string): Promise<void> => {
@@ -191,12 +185,11 @@ export const sendMediaCardToChat = async (ctx: any, item: any) => {
   let s: any = await AppSettings.findOne({ key: 'global' });
   if (!s) s = await AppSettings.create({ key: 'global' });
   const caption = formatCaption(item, s);
-  const keyboard = buildPostKeyboard(s);
   const poster = item.posterPath ? `https://image.tmdb.org/t/p/w500${item.posterPath}` : null;
   if (poster) {
-    return ctx.replyWithPhoto(poster, { caption, parse_mode: 'HTML', ...keyboard });
+    return ctx.replyWithPhoto(poster, { caption, parse_mode: 'HTML' });
   }
-  return ctx.replyWithHTML(caption, keyboard);
+  return ctx.replyWithHTML(caption, { link_preview_options: { is_disabled: true } } as any);
 };
 
 const renderAdminPanel = async (ctx: any, edit = false) => {
