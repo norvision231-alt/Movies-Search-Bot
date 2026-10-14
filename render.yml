@@ -1,0 +1,21 @@
+services:
+  - type: web
+    name: movie-bot-service
+    env: node
+    buildCommand: npm install && npm run build
+    startCommand: npm start
+    envVars:
+      - key: PORT
+        value: 3000
+      - key: MONGODB_URI
+        sync: false
+      - key: BOT_TOKEN
+        sync: false
+      - key: TMDB_API_TOKEN
+        sync: false
+      - key: LOG_CHANNEL
+        sync: false
+      - key: ADMIN_ID
+        sync: false
+      - key: CHATGPT_API_KEY
+        sync: false
