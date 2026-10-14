@@ -1,6 +1,14 @@
 import { Telegraf, Markup } from 'telegraf';
 import { MediaItem, MonthJob, AppSettings, BotUser } from '../database/models';
-import { searchTMDBMulti, fetchTMDBDetails, mapGenreIds, enrichWithAI } from '../services/tmdb';
+import {
+  searchTMDBMulti,
+  fetchTMDBDetails,
+  mapGenreIds,
+  extractAvailableLanguages,
+  suggestCorrectTitleWithAI,
+  enrichWithAI,
+  LANG_NAME_MAP
+} from '../services/tmdb';
 
 const token = (process.env.BOT_TOKEN || process.env.TELEGRAM_BOT_TOKEN || '').trim();
 if (!token) throw new Error('BOT_TOKEN is missing');
@@ -35,11 +43,19 @@ export const escapeHtml = (unsafe: string = ''): string => {
     .replace(/"/g, '&quot;');
 };
 
-const LANG_MAP: Record<string, string> = {
-  hi: 'Hindi', en: 'English', ta: 'Tamil', te: 'Telugu', ml: 'Malayalam', kn: 'Kannada',
-  bn: 'Bengali', mr: 'Marathi', pa: 'Punjabi', gu: 'Gujarati', ur: 'Urdu', ko: 'Korean',
-  ja: 'Japanese', zh: 'Chinese', es: 'Spanish', fr: 'French', de: 'German', it: 'Italian',
-  ru: 'Russian', pt: 'Portuguese', tr: 'Turkish', th: 'Thai', id: 'Indonesian', su: 'Sundanese'
+// Format minutes into "2 hours 30 min" or "45 min"
+export const formatRuntimeHoursMins = (totalMinutes?: number): string => {
+  const mins = Number(totalMinutes || 0);
+  if (!mins || mins <= 0) return '';
+  const hours = Math.floor(mins / 60);
+  const remMins = mins % 60;
+  if (hours > 0 && remMins > 0) {
+    return `${hours} ${hours === 1 ? 'hour' : 'hours'} ${remMins} min`;
+  }
+  if (hours > 0) {
+    return `${hours} ${hours === 1 ? 'hour' : 'hours'}`;
+  }
+  return `${remMins} min`;
 };
 
 const createSeoHashtags = (media: any, langName: string): string => {
@@ -52,23 +68,28 @@ const createSeoHashtags = (media: any, langName: string): string => {
     .join('');
   const year = media.releaseDate ? String(media.releaseDate).substring(0, 4) : '';
   const typeTag = media.mediaType === 'tv' ? '#WebSeries #TVSeries' : '#Movies #FullMovie';
-  const langTag = langName.split(' ')[0].replace(/[^a-zA-Z]/g, '');
+  const langTag = langName.split(',')[0].trim().replace(/[^a-zA-Z]/g, '');
   const genreTags = Array.isArray(media.genres)
     ? media.genres.slice(0, 3).map((g: string) => `#${String(g).replace(/[^a-zA-Z0-9]/g, '')}`).join(' ')
     : '';
   return [cleanTitle ? `#${cleanTitle}` : '', year ? `#Release${year}` : '', langTag ? `#${langTag}` : '', typeTag, genreTags, '#HDMovies'].filter(Boolean).join(' ');
 };
 
-// Clean Caption with Embedded Text Links Only (No duplicate bottom buttons)
-export const formatCaption = (media: any, settings: any): string => {
+export const getDisplayLanguages = (media: any): string => {
+  const langCode = String(media.originalLanguage || '').toLowerCase();
+  const primary = LANG_NAME_MAP[langCode] || '';
+  const avail = Array.isArray(media.availableLanguages) ? media.availableLanguages : [];
+  const spoken = Array.isArray(media.spokenLanguages) ? media.spokenLanguages : [];
+  const combined = Array.from(new Set([primary, ...avail, ...spoken].filter(Boolean)));
+  if (combined.length > 0) return combined.join(', ');
+  return String(media.originalLanguage || 'English').toUpperCase();
+};
+
+// Clean Caption with Available Languages, Hours/Mins Runtime & Embedded Text Links
+export const formatCaption = (media: any, settings: any, extraFooterHtml = ''): string => {
   const title = escapeHtml(media.title || 'Untitled');
   const year = media.releaseDate ? escapeHtml(String(media.releaseDate).substring(0, 4)) : 'N/A';
-  const langCode = String(media.originalLanguage || '').toLowerCase();
-  const langDisplay =
-    LANG_MAP[langCode] ||
-    (Array.isArray(media.spokenLanguages) && media.spokenLanguages.length > 0
-      ? media.spokenLanguages.join(', ')
-      : String(media.originalLanguage || 'English').toUpperCase());
+  const langDisplay = getDisplayLanguages(media);
 
   const genres =
     Array.isArray(media.genres) && media.genres.length > 0
@@ -83,10 +104,10 @@ export const formatCaption = (media: any, settings: any): string => {
   const rawOverview = media.overview ? String(media.overview).trim() : '';
   const fallbackDesc = `Watch ${media.title} (${year}), an engaging ${genres.toLowerCase()} ${
     media.mediaType === 'tv' ? 'web series' : 'movie'
-  } in ${langDisplay} with HD quality.`;
+  } available in ${langDisplay} in HD quality.`;
   const descSource = rawOverview.length > 15 ? rawOverview : fallbackDesc;
   const shortOverview =
-    descSource.length > 250 ? `${escapeHtml(descSource.substring(0, 247))}...` : escapeHtml(descSource);
+    descSource.length > 240 ? `${escapeHtml(descSource.substring(0, 237))}...` : escapeHtml(descSource);
 
   const c1 = (settings?.channel01Url || 'https://t.me/yourchannel1').trim();
   const c2 = (settings?.channel02Url || 'https://t.me/yourchannel2').trim();
@@ -103,13 +124,17 @@ export const formatCaption = (media: any, settings: any): string => {
   if (media.rtRating) {
     lines.push(`🍅 <b>RT Audience:</b> ${escapeHtml(String(media.rtRating))}`);
   }
-  lines.push(`🌐 <b>Language:</b> ${escapeHtml(langDisplay)}`, `🎭 <b>Genre:</b> ${genres}`);
+  lines.push(
+    `🌐 <b>Available in:</b> ${escapeHtml(langDisplay)}`,
+    `🎭 <b>Genre:</b> ${genres}`
+  );
   if (media.mediaType === 'tv' && media.seasonCount && Number(media.seasonCount) > 0) {
     const ep = media.episodeCount ? ` (${media.episodeCount} Episodes)` : '';
     lines.push(`📺 <b>Seasons:</b> ${escapeHtml(String(media.seasonCount))}${escapeHtml(ep)}`);
   }
-  if (media.runtime && Number(media.runtime) > 0) {
-    lines.push(`⏱️ <b>Runtime:</b> ${escapeHtml(String(media.runtime))} min`);
+  const formattedRuntime = formatRuntimeHoursMins(media.runtime);
+  if (formattedRuntime) {
+    lines.push(`⏱️ <b>Runtime:</b> ${escapeHtml(formattedRuntime)}`);
   }
   lines.push(`⭐ <b>TMDB Rating:</b> ${escapeHtml(tmdbRating)}`);
   if (ourRating) {
@@ -125,14 +150,17 @@ export const formatCaption = (media: any, settings: any): string => {
     `💎 <a href="${escapeHtml(prem)}"><b>JOIN PREMIUM CONTENT</b></a>`,
     '━━━━━━━━━━━━━━',
     `🔞 <a href="${escapeHtml(adult)}"><b>18+ CONTENT ONLY</b></a>`,
-    '⚠️ <i>Adults only where applicable. Viewer discretion advised.</i>',
-    '',
-    escapeHtml(createSeoHashtags(media, langDisplay))
+    '⚠️ <i>Adults only where applicable. Viewer discretion advised.</i>'
   );
+
+  if (extraFooterHtml) {
+    lines.push('━━━━━━━━━━━━━━', extraFooterHtml);
+  }
+
+  lines.push('', escapeHtml(createSeoHashtags(media, langDisplay)));
   return lines.join('\n');
 };
 
-// Returns empty object so no duplicate inline buttons appear below posts
 export const buildPostKeyboard = (_settings: any): Record<string, any> => {
   return {};
 };
@@ -165,6 +193,94 @@ export const notifyAdminError = async (source: string, error: any, fixHint = '')
   }
 };
 
+// Enqueue unposted movie for priority channel auto-posting & return countdown timer HTML
+const queueMovieForChannelAndGetTimer = async (item: any, userId?: number, settings?: any): Promise<string> => {
+  if (item.isPublished) {
+    return `✅ <b>Channel Status:</b> Already Published on Channel!`;
+  }
+
+  if (!item.userRequested) {
+    item.userRequested = true;
+    item.requestedAt = new Date();
+  }
+  if (userId && Array.isArray(item.requestedBy) && !item.requestedBy.includes(userId)) {
+    item.requestedBy.push(userId);
+  }
+  await item.save();
+
+  const aheadCount = await MediaItem.countDocuments({
+    isPublished: false,
+    userRequested: true,
+    requestedAt: { $lt: item.requestedAt || new Date() }
+  });
+  const position = aheadCount + 1;
+
+  const intervalMins = Math.max(1, Number(settings?.publishIntervalMinutes || 20));
+  const intervalMs = intervalMins * 60 * 1000;
+  const lastPubMs = settings?.lastPublishAt ? new Date(settings.lastPublishAt).getTime() : 0;
+  const now = Date.now();
+
+  const nextSlotMs = lastPubMs > 0 ? Math.max(now + 45000, lastPubMs + intervalMs) : now + 60000;
+  const targetPostMs = nextSlotMs + (position - 1) * intervalMs;
+  const waitSec = Math.max(30, Math.floor((targetPostMs - now) / 1000));
+  const waitMins = Math.floor(waitSec / 60);
+  const remSec = waitSec % 60;
+
+  const istTimeStr = new Date(targetPostMs).toLocaleTimeString('en-IN', {
+    timeZone: 'Asia/Kolkata',
+    hour: '2-digit',
+    minute: '2-digit',
+    hour12: true
+  });
+
+  const timerText = waitMins > 0 ? `${waitMins} min ${remSec} sec` : `${remSec} sec`;
+  return (
+    `⏳ <b>Channel Auto-Post Queue:</b> Added at Position <b>#${position}</b>\n` +
+    `⏰ <b>Estimated Post Time:</b> In <b>${timerText}</b> (around <b>${istTimeStr} IST</b>)\n` +
+    `🔔 <i>You will receive an automatic alert as soon as it is posted!</i>`
+  );
+};
+
+export const sendMediaCardToChat = async (ctx: any, item: any) => {
+  let s: any = await AppSettings.findOne({ key: 'global' });
+  if (!s) s = await AppSettings.create({ key: 'global' });
+
+  const queueTimerHtml = await queueMovieForChannelAndGetTimer(item, ctx.from?.id, s);
+  const caption = formatCaption(item, s, queueTimerHtml);
+  const poster = item.posterPath ? `https://image.tmdb.org/t/p/w500${item.posterPath}` : null;
+  if (poster) {
+    return ctx.replyWithPhoto(poster, { caption, parse_mode: 'HTML' });
+  }
+  return ctx.replyWithHTML(caption, { link_preview_options: { is_disabled: true } } as any);
+};
+
+// Levenshtein / Fuzzy Similarity Score between 0 and 1
+const calcSimilarity = (a: string, b: string): number => {
+  const s1 = a.toLowerCase().replace(/[^a-z0-9\s]/g, '').trim();
+  const s2 = b.toLowerCase().replace(/[^a-z0-9\s]/g, '').trim();
+  if (!s1 || !s2) return 0;
+  if (s1 === s2 || s2.includes(s1) || s1.includes(s2)) return 0.95;
+
+  const track = Array(s2.length + 1)
+    .fill(null)
+    .map(() => Array(s1.length + 1).fill(null));
+  for (let i = 0; i <= s1.length; i += 1) track[0][i] = i;
+  for (let j = 0; j <= s2.length; j += 1) track[j][0] = j;
+  for (let j = 1; j <= s2.length; j += 1) {
+    for (let i = 1; i <= s1.length; i += 1) {
+      const ind = s1[i - 1] === s2[j - 1] ? 0 : 1;
+      track[j][i] = Math.min(
+        track[j][i - 1] + 1,
+        track[j - 1][i] + 1,
+        track[j - 1][i - 1] + ind
+      );
+    }
+  }
+  const distance = track[s2.length][s1.length];
+  const maxLen = Math.max(s1.length, s2.length);
+  return maxLen > 0 ? (maxLen - distance) / maxLen : 0;
+};
+
 bot.use(async (ctx, next) => {
   if (ctx.from && ctx.chat?.type === 'private') {
     try {
@@ -181,24 +297,14 @@ bot.use(async (ctx, next) => {
   return next();
 });
 
-export const sendMediaCardToChat = async (ctx: any, item: any) => {
-  let s: any = await AppSettings.findOne({ key: 'global' });
-  if (!s) s = await AppSettings.create({ key: 'global' });
-  const caption = formatCaption(item, s);
-  const poster = item.posterPath ? `https://image.tmdb.org/t/p/w500${item.posterPath}` : null;
-  if (poster) {
-    return ctx.replyWithPhoto(poster, { caption, parse_mode: 'HTML' });
-  }
-  return ctx.replyWithHTML(caption, { link_preview_options: { is_disabled: true } } as any);
-};
-
 const renderAdminPanel = async (ctx: any, edit = false) => {
   let s: any = await AppSettings.findOne({ key: 'global' });
   if (!s) s = await AppSettings.create({ key: 'global' });
-  const [total, published, pending, totalUsers, bannedUsers, activeJob] = await Promise.all([
+  const [total, published, pending, priorityQueue, totalUsers, bannedUsers, activeJob] = await Promise.all([
     MediaItem.countDocuments(),
     MediaItem.countDocuments({ isPublished: true }),
     MediaItem.countDocuments({ isPublished: false }),
+    MediaItem.countDocuments({ isPublished: false, userRequested: true }),
     BotUser.countDocuments(),
     BotUser.countDocuments({ isBanned: true }),
     MonthJob.findOne({ status: { $ne: 'COMPLETED' } }).sort({ month: -1 })
@@ -216,6 +322,7 @@ const renderAdminPanel = async (ctx: any, edit = false) => {
     `⭐ <b>Our Rating:</b> <code>${escapeHtml(s.ourRating || '4.7/5')}</code>\n` +
     `━━━━━━━━━━━━━━━━━━━━\n` +
     `🎬 <b>DB:</b> ${total} | ✅ <b>Posted:</b> ${published} | ⏳ <b>Queue:</b> ${pending}\n` +
+    `🔥 <b>User Priority Queue:</b> ${priorityQueue}\n` +
     `👥 <b>Users:</b> ${totalUsers} | 🚫 <b>Banned:</b> ${bannedUsers}`;
 
   const kb = Markup.inlineKeyboard([
@@ -262,19 +369,19 @@ const renderAdminPanel = async (ctx: any, edit = false) => {
 bot.start((ctx) => {
   ctx.replyWithHTML(
     '🎬 <b>Welcome to the Movie & Web-Series Bot!</b>\n\n' +
-      '🔎 Send any movie or series name directly (e.g., <code>Kingsman</code>, <code>Inception</code>) or use <code>/search TITLE</code>.\n' +
-      '🆕 Use <code>/latest</code> for recent releases.\n' +
-      '👑 Admins: Send <code>/admin</code> for Master Control Panel.'
+      '🔎 <b>How to Search:</b> Send the exact Movie or Web-Series title (e.g., <code>Stay Good</code>, <code>Kingsman</code>, <code>Inception 2010</code>).\n' +
+      '⏳ If a movie is not yet on our channel, the bot will automatically add it to the <b>Priority Auto-Post Queue</b> and give you a live timer!\n' +
+      '🆕 Send <code>/latest</code> for recent releases.'
   );
 });
 
 bot.help((ctx) => {
   ctx.replyWithHTML(
-    '📌 <b>Available Commands:</b>\n' +
-      '• Send any title to search\n' +
+    '📌 <b>Search Guide & Commands:</b>\n\n' +
+      '✅ <b>Search Format:</b> <code>Movie Name</code> or <code>Movie Name Year</code>\n' +
       '• <code>/search &lt;title&gt;</code> - Search by title\n' +
       '• <code>/latest</code> - Latest 10 titles\n' +
-      '• <code>/status</code> - Bot & DB status\n' +
+      '• <code>/status</code> - Bot & Queue status\n' +
       '• <code>/admin</code> - Master Admin Panel'
   );
 });
@@ -440,15 +547,16 @@ bot.action('admin_stop_all', async (ctx) => {
 });
 
 bot.command('status', async (ctx) => {
-  const [total, pub, pend, job, s]: any = await Promise.all([
+  const [total, pub, pend, prio, job, s]: any = await Promise.all([
     MediaItem.countDocuments(),
     MediaItem.countDocuments({ isPublished: true }),
     MediaItem.countDocuments({ isPublished: false }),
+    MediaItem.countDocuments({ isPublished: false, userRequested: true }),
     MonthJob.findOne({ status: { $ne: 'COMPLETED' } }).sort({ month: -1 }),
     AppSettings.findOne({ key: 'global' })
   ]);
   return ctx.replyWithHTML(
-    `📊 <b>Status:</b>\n🌱 Seeding: ${s?.autoSeedingEnabled ? 'ON' : 'OFF'}\n📤 Publish: ${s?.autoPublishEnabled ? 'ON' : 'OFF'} (Every ${s?.publishIntervalMinutes || 20}m)\n📅 Month: ${job ? `${job.month} P${job.currentPage}/${job.totalPages}` : 'Idle'}\n🎬 Total: ${total} | ✅ Posted: ${pub} | ⏳ Queue: ${pend}`
+    `📊 <b>Status:</b>\n🌱 Seeding: ${s?.autoSeedingEnabled ? 'ON' : 'OFF'}\n📤 Publish: ${s?.autoPublishEnabled ? 'ON' : 'OFF'} (Every ${s?.publishIntervalMinutes || 20}m)\n📅 Month: ${job ? `${job.month} P${job.currentPage}/${job.totalPages}` : 'Idle'}\n🎬 Total: ${total} | ✅ Posted: ${pub} | ⏳ Queue: ${pend} (🔥 Priority: ${prio})`
   );
 });
 
@@ -461,84 +569,180 @@ bot.command('latest', async (ctx) => {
   return ctx.replyWithHTML('🆕 <b>Latest Titles:</b>', Markup.inlineKeyboard(buttons));
 });
 
+const enrichItemFull = async (item: any): Promise<any> => {
+  if (!item.runtime || !item.overview || !Array.isArray(item.availableLanguages) || item.availableLanguages.length === 0) {
+    const d = await fetchTMDBDetails(item.tmdbId, item.mediaType);
+    if (d) {
+      item.genres = d.genres?.map((g: any) => g.name) || item.genres;
+      item.runtime = d.runtime || (d.episode_run_time ? d.episode_run_time[0] : 0) || item.runtime || 0;
+      item.seasonCount = d.number_of_seasons || item.seasonCount || 0;
+      item.episodeCount = d.number_of_episodes || item.episodeCount || 0;
+      item.imdbId = d.external_ids?.imdb_id || d.imdb_id || item.imdbId || '';
+      item.availableLanguages = extractAvailableLanguages(d, item.originalLanguage);
+    }
+    item = await enrichWithAI(item);
+    await item.save();
+  }
+  return item;
+};
+
 bot.action(/^view_(.+)$/, async (ctx) => {
   try {
     let item: any = await MediaItem.findById(ctx.match[1]);
     if (!item) return ctx.answerCbQuery('Not found');
-    await ctx.answerCbQuery('Loading...');
-    if (!item.runtime || !item.overview || !Array.isArray(item.genres) || item.genres.length === 0) {
-      const d = await fetchTMDBDetails(item.tmdbId, item.mediaType);
-      if (d) {
-        item.genres = d.genres?.map((g: any) => g.name) || item.genres;
-        item.runtime = d.runtime || (d.episode_run_time ? d.episode_run_time[0] : 0) || 0;
-        item.seasonCount = d.number_of_seasons || 0;
-        item.episodeCount = d.number_of_episodes || 0;
-        item.imdbId = d.external_ids?.imdb_id || d.imdb_id || '';
-      }
-      item = await enrichWithAI(item);
-      await item.save();
-    }
+    await ctx.answerCbQuery('Loading details & queue timer...');
+    item = await enrichItemFull(item);
     return sendMediaCardToChat(ctx, item);
   } catch (_e) {
     return ctx.answerCbQuery('Error');
   }
 });
 
+const saveTMDBHitsToDB = async (hits: any[]) => {
+  for (const hit of hits.slice(0, 5)) {
+    const mediaType: 'movie' | 'tv' = hit.media_type === 'tv' ? 'tv' : 'movie';
+    const d = await fetchTMDBDetails(hit.id, mediaType);
+    const availLangs = extractAvailableLanguages(d, hit.original_language);
+    const doc: any = await MediaItem.findOneAndUpdate(
+      { tmdbId: hit.id, mediaType },
+      {
+        $set: {
+          title: hit.title || hit.name || 'Untitled',
+          originalLanguage: hit.original_language || '',
+          availableLanguages: availLangs,
+          genres: d?.genres?.map((g: any) => g.name) || mapGenreIds(hit.genre_ids || []),
+          overview: hit.overview || d?.overview || '',
+          posterPath: hit.poster_path || d?.poster_path || '',
+          releaseDate: hit.release_date || hit.first_air_date || '',
+          tmdbRating: hit.vote_average || 0,
+          voteCount: hit.vote_count || 0,
+          runtime: d?.runtime || (d?.episode_run_time ? d.episode_run_time[0] : 0) || 0,
+          seasonCount: d?.number_of_seasons || 0,
+          episodeCount: d?.number_of_episodes || 0,
+          imdbId: d?.external_ids?.imdb_id || d?.imdb_id || ''
+        }
+      },
+      { upsert: true, new: true }
+    );
+    if (doc && (!doc.overview || !doc.runtime)) {
+      await enrichWithAI(doc);
+      await doc.save();
+    }
+  }
+};
+
+// Smart Search with Exact, Fuzzy/Typo Tolerance, Spelling Guide & Google Search Link
 const handleTitleSearch = async (ctx: any, rawQuery: string) => {
   const cleanQuery = rawQuery.replace(/^\d+\.\s*/, '').replace(/🎬/g, '').replace(/\(\d{4}\)\s*$/, '').trim();
-  if (!cleanQuery || cleanQuery.length < 2) return ctx.reply('Please enter a valid movie/series name.');
+  if (!cleanQuery || cleanQuery.length < 2) {
+    return ctx.replyWithHTML(
+      '⚠️ <b>Invalid Search Format!</b>\n' +
+        '✅ <b>Correct Format:</b> <code>Movie Name</code> or <code>Movie Name Year</code> (e.g., <code>Stay Good</code>)'
+    );
+  }
+
+  const googleUrl = `https://www.google.com/search?q=${encodeURIComponent(cleanQuery + ' movie')}`;
 
   try {
     const escaped = cleanQuery.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-    let results = await MediaItem.find({ title: { $regex: escaped,$options: 'i' } }).sort({ voteCount: -1, releaseDate: -1 }).limit(8);
+    let results = await MediaItem.find({ title: { $regex: escaped,$options: 'i' } })
+      .sort({ voteCount: -1, releaseDate: -1 })
+      .limit(8);
 
+    let usedFuzzyOrSpellingFix = false;
+    let suggestedTitle = '';
+
+    // 1. Try direct TMDB search if not in local DB
     if (results.length === 0) {
-      const liveHits = await searchTMDBMulti(cleanQuery);
-      for (const hit of liveHits.slice(0, 5)) {
-        const mediaType: 'movie' | 'tv' = hit.media_type === 'tv' ? 'tv' : 'movie';
-        const d = await fetchTMDBDetails(hit.id, mediaType);
-        const doc: any = await MediaItem.findOneAndUpdate(
-          { tmdbId: hit.id, mediaType },
-          {
-            $set: {
-              title: hit.title || hit.name || 'Untitled',
-              originalLanguage: hit.original_language || '',
-              genres: d?.genres?.map((g: any) => g.name) || mapGenreIds(hit.genre_ids || []),
-              overview: hit.overview || d?.overview || '',
-              posterPath: hit.poster_path || d?.poster_path || '',
-              releaseDate: hit.release_date || hit.first_air_date || '',
-              tmdbRating: hit.vote_average || 0,
-              voteCount: hit.vote_count || 0,
-              runtime: d?.runtime || (d?.episode_run_time ? d.episode_run_time[0] : 0) || 0,
-              seasonCount: d?.number_of_seasons || 0,
-              episodeCount: d?.number_of_episodes || 0,
-              imdbId: d?.external_ids?.imdb_id || d?.imdb_id || ''
-            }
-          },
-          { upsert: true, new: true }
-        );
-        if (doc && (!doc.overview || !doc.runtime)) {
-          await enrichWithAI(doc);
-          await doc.save();
+      let liveHits = await searchTMDBMulti(cleanQuery);
+
+      // 2. If TMDB also returned 0 (user made a typo like "Sta good"), try word split & AI spell correction
+      if (liveHits.length === 0) {
+        usedFuzzyOrSpellingFix = true;
+        const words = cleanQuery.split(/\s+/).filter((w) => w.length >= 3);
+        for (const w of words.sort((a, b) => b.length - a.length)) {
+          liveHits = await searchTMDBMulti(w);
+          if (liveHits.length > 0) break;
+        }
+
+        if (liveHits.length === 0) {
+          suggestedTitle = await suggestCorrectTitleWithAI(cleanQuery);
+          if (suggestedTitle && suggestedTitle.toLowerCase() !== cleanQuery.toLowerCase()) {
+            liveHits = await searchTMDBMulti(suggestedTitle);
+          }
         }
       }
-      results = await MediaItem.find({ title: { $regex: escaped,$options: 'i' } }).sort({ voteCount: -1, releaseDate: -1 }).limit(8);
+
+      if (liveHits.length > 0) {
+        await saveTMDBHitsToDB(liveHits);
+      }
+
+      // 3. Re-query local DB or run Fuzzy Similarity matching across DB titles
+      results = await MediaItem.find({ title: { $regex: escaped,$options: 'i' } })
+        .sort({ voteCount: -1, releaseDate: -1 })
+        .limit(8);
+
+      if (results.length === 0) {
+        usedFuzzyOrSpellingFix = true;
+        const candidates = await MediaItem.find().sort({ updatedAt: -1 }).limit(400);
+        const scored = candidates
+          .map((item: any) => ({
+            item,
+            score: Math.max(
+              calcSimilarity(cleanQuery, item.title || ''),
+              suggestedTitle ? calcSimilarity(suggestedTitle, item.title || '') : 0
+            )
+          }))
+          .filter((entry) => entry.score >= 0.45)
+          .sort((a, b) => b.score - a.score)
+          .slice(0, 6);
+
+        results = scored.map((s) => s.item);
+      }
     }
 
-    if (results.length === 0) return ctx.reply(`No results found for "${cleanQuery}".`);
-    if (results.length === 1) {
-      let item: any = results[0];
-      if (!item.runtime || !item.overview || !item.imdbRating) {
-        item = await enrichWithAI(item);
-        await item.save();
-      }
+    // No match even after fuzzy & AI -> Show Spelling Format Guide + Google Search Redirect Button
+    if (results.length === 0) {
+      return ctx.replyWithHTML(
+        `❌ <b>No exact match found for "${escapeHtml(cleanQuery)}"</b>\n\n` +
+          `⚠️ <b>Spelling & Search Guide:</b>\n` +
+          `• Please make sure the movie/series spelling is accurate.\n` +
+          `• <b>Search Format:</b> <code>Movie Name</code> (e.g., <code>Stay Good</code> or <code>Kingsman</code>)\n\n` +
+          `👇 <i>Click the button below to check the exact spelling on Google, then copy & paste the correct title here:</i>`,
+        Markup.inlineKeyboard([
+          [Markup.button.url(`🔎 Check "${cleanQuery}" on Google`, googleUrl)]
+        ])
+      );
+    }
+
+    // Exact single match -> Enrich, Queue for Channel Auto-Post with Timer & Send Card
+    if (results.length === 1 && !usedFuzzyOrSpellingFix) {
+      let item: any = await enrichItemFull(results[0]);
       return sendMediaCardToChat(ctx, item);
     }
 
-    const buttons = results.map((item: any) => [
-      Markup.button.callback(`🎬 ${item.title} (${item.releaseDate ? String(item.releaseDate).substring(0, 4) : 'N/A'})`, `view_${item._id}`)
-    ]);
-    return ctx.replyWithHTML(`🔎 <b>Results for "${escapeHtml(cleanQuery)}":</b>`, Markup.inlineKeyboard(buttons));
+    const buttons = results.map((item: any) => {
+      const year = item.releaseDate ? String(item.releaseDate).substring(0, 4) : 'N/A';
+      const statusIcon = item.isPublished ? '✅' : '⏳';
+      return [
+        Markup.button.callback(
+          `${statusIcon} 🎬 ${item.title} (${year})`,
+          `view_${item._id}`
+        )
+      ];
+    });
+
+    // Always attach Google Spell-Check Redirect button at the bottom of search lists
+    buttons.push([Markup.button.url(`🔎 Not here? Check "${cleanQuery}" on Google`, googleUrl)]);
+
+    const headerText = usedFuzzyOrSpellingFix
+      ? `⚠️ <b>No exact match for "${escapeHtml(cleanQuery)}". Showing closest matches:</b>\n` +
+        `💡 <i>Tip: Use exact spelling (Format: <code>Movie Name</code>). If your movie isn't listed below, click the Google button to copy the exact title!</i>\n\n` +
+        `👇 <b>Select a movie below to view details & auto-post timer:</b>`
+      : `🔎 <b>Search Results for "${escapeHtml(cleanQuery)}":</b>\n` +
+        `<i>(✅ = On Channel | ⏳ = Click to Auto-Queue with Timer)</i>`;
+
+    return ctx.replyWithHTML(headerText, Markup.inlineKeyboard(buttons));
   } catch (_e) {
     return ctx.reply('Search error. Please try again.');
   }
