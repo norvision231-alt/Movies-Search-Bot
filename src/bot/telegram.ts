@@ -1,5 +1,5 @@
-import { Telegraf, Markup } from 'telegraf';
-import { MediaItem, AppSettings } from '../database/models';
+import { Telegraf } from 'telegraf';
+import { MediaItem, MonthJob, AppSettings } from '../database/models';
 
 const token = (process.env.BOT_TOKEN || process.env.TELEGRAM_BOT_TOKEN || '').trim();
 if (!token) throw new Error('BOT_TOKEN is missing');
@@ -42,16 +42,20 @@ export const formatCaption = (media: any, settings: any): string => {
   const title = escapeHtml(media.title || 'Untitled');
   const year = media.releaseDate ? escapeHtml(String(media.releaseDate).substring(0, 4)) : 'N/A';
   const langCode = (media.originalLanguage || '').toLowerCase();
-  const language = escapeHtml(LANGUAGE_NAMES[langCode] || media.originalLanguage?.toUpperCase() || 'N/A');
-  const genres = Array.isArray(media.genres) && media.genres.length > 0
-    ? escapeHtml(media.genres.join(', '))
-    : 'N/A';
+  const language = escapeHtml(
+    LANGUAGE_NAMES[langCode] || media.originalLanguage?.toUpperCase() || 'N/A'
+  );
+  const genres =
+    Array.isArray(media.genres) && media.genres.length > 0
+      ? escapeHtml(media.genres.join(', '))
+      : 'N/A';
   const rating = media.tmdbRating ? `${Number(media.tmdbRating).toFixed(1)}/10` : 'N/A';
 
   const rawOverview = media.overview ? String(media.overview).trim() : '';
-  const shortOverview = rawOverview.length > 240
-    ? `${escapeHtml(rawOverview.substring(0, 237))}...`
-    : escapeHtml(rawOverview);
+  const shortOverview =
+    rawOverview.length > 240
+      ? `${escapeHtml(rawOverview.substring(0, 237))}...`
+      : escapeHtml(rawOverview);
 
   const channel01Url = settings?.channel01Url || 'https://t.me/yourchannel1';
   const channel02Url = settings?.channel02Url || 'https://t.me/yourchannel2';
@@ -109,24 +113,82 @@ export const sendToLogChannel = async (message: string): Promise<void> => {
   }
 };
 
-// Bot Commands
 bot.start((ctx) => {
   ctx.replyWithHTML(
     '🎬 <b>Welcome to the Movie & Web-Series Archive Bot!</b>\n\n' +
-    '🔎 किसी भी मूवी या सीरीज़ को खोजने के लिए उसका नाम भेजें या <code>/search TITLE</code> का उपयोग करें।\n' +
-    '🆕 नवीनतम अपडेट्स के लिए <code>/latest</code> भेजें।\n' +
-    'ℹ️ मदद के लिए <code>/help</code> भेजें।'
+      '🔎 किसी भी मूवी या सीरीज़ को खोजने के लिए उसका नाम भेजें या <code>/search TITLE</code> का उपयोग करें।\n' +
+      '🆕 नवीनतम अपडेट्स के लिए <code>/latest</code> भेजें।\n' +
+      '📊 स्टेटस देखने के लिए <code>/status</code> भेजें।'
   );
 });
 
 bot.help((ctx) => {
   ctx.replyWithHTML(
     '📌 <b>Available Commands:</b>\n\n' +
-    '• <code>/start</code> - बॉट शुरू करें\n' +
-    '• <code>/search &lt;title&gt;</code> - मूवी या वेब-सीरीज़ खोजें\n' +
-    '• <code>/latest</code> - हाल ही में जोड़े गए टाइटल्स देखें\n' +
-    '• या सीधे मूवी का नाम टाइप करके भेजें।'
+      '• <code>/start</code> - बॉट शुरू करें\n' +
+      '• <code>/search &lt;title&gt;</code> - मूवी या वेब-सीरीज़ खोजें\n' +
+      '• <code>/latest</code> - हाल ही में जोड़े गए टाइटल्स देखें\n' +
+      '• <code>/status</code> - डेटाबेस और ऑटोमेशन स्टेटस (Admin)\n' +
+      '• <code>/seeding_on</code> / <code>/seeding_off</code> - सीडिंग कंट्रोल (Admin)\n' +
+      '• <code>/publish_on</code> / <code>/publish_off</code> - पब्लिशिंग कंट्रोल (Admin)\n' +
+      '• <code>/stop_all</code> - Emergency Stop All (Admin)'
   );
+});
+
+bot.command('status', async (ctx) => {
+  try {
+    const totalMovies = await MediaItem.countDocuments();
+    const publishedCount = await MediaItem.countDocuments({ isPublished: true });
+    const pendingCount = await MediaItem.countDocuments({ isPublished: false });
+    const activeJob = await MonthJob.findOne({ status: { $ne: 'COMPLETED' } }).sort({ month: -1 });
+    const settings = await AppSettings.findOne({ key: 'global' });
+
+    return ctx.replyWithHTML(
+      `📊 <b>Bot & Database Status:</b>\n\n` +
+        `🌱 <b>Auto Seeding:</b> ${settings?.autoSeedingEnabled ? '✅ ON' : '⏸️ OFF'}\n` +
+        `📤 <b>Auto Publishing:</b> ${settings?.autoPublishEnabled ? '✅ ON' : '⏸️ OFF'}\n` +
+        `📅 <b>Active Month:</b> ${activeJob ? `${activeJob.month} (Page ${activeJob.currentPage}/${activeJob.totalPages})` : 'N/A'}\n` +
+        `🎬 <b>Total Collected:</b> ${totalMovies}\n` +
+        `✅ <b>Published:</b> ${publishedCount}\n` +
+        `⏳ <b>Queued:</b> ${pendingCount}`
+    );
+  } catch (error) {
+    return ctx.reply('स्टेटस लोड करने में त्रुटि हुई।');
+  }
+});
+
+bot.command('seeding_on', async (ctx) => {
+  if (!isAdmin(ctx.from?.id)) return ctx.reply('⛔ केवल एडमिन के लिए।');
+  await AppSettings.updateOne({ key: 'global' }, { $set: { autoSeedingEnabled: true } }, { upsert: true });
+  return ctx.reply('✅ Auto Seeding चालू कर दी गई है।');
+});
+
+bot.command('seeding_off', async (ctx) => {
+  if (!isAdmin(ctx.from?.id)) return ctx.reply('⛔ केवल एडमिन के लिए।');
+  await AppSettings.updateOne({ key: 'global' }, { $set: { autoSeedingEnabled: false } }, { upsert: true });
+  return ctx.reply('⏸️ Auto Seeding रोक दी गई है।');
+});
+
+bot.command('publish_on', async (ctx) => {
+  if (!isAdmin(ctx.from?.id)) return ctx.reply('⛔ केवल एडमिन के लिए।');
+  await AppSettings.updateOne({ key: 'global' }, { $set: { autoPublishEnabled: true } }, { upsert: true });
+  return ctx.reply('✅ Auto Publishing चालू कर दी गई है।');
+});
+
+bot.command('publish_off', async (ctx) => {
+  if (!isAdmin(ctx.from?.id)) return ctx.reply('⛔ केवल एडमिन के लिए।');
+  await AppSettings.updateOne({ key: 'global' }, { $set: { autoPublishEnabled: false } }, { upsert: true });
+  return ctx.reply('⏸️ Auto Publishing रोक दी गई है।');
+});
+
+bot.command('stop_all', async (ctx) => {
+  if (!isAdmin(ctx.from?.id)) return ctx.reply('⛔ केवल एडमिन के लिए।');
+  await AppSettings.updateOne(
+    { key: 'global' },
+    { $set: { autoSeedingEnabled: false, autoPublishEnabled: false, aiEnabled: false } },
+    { upsert: true }
+  );
+  return ctx.reply('🛑 EMERGENCY STOP: सभी ऑटोमेटेड जॉब्स रोक दिए गए हैं।');
 });
 
 bot.command('latest', async (ctx) => {
@@ -139,14 +201,13 @@ bot.command('latest', async (ctx) => {
     const list = items
       .map((item: any, idx: number) => {
         const year = item.releaseDate ? String(item.releaseDate).substring(0, 4) : 'N/A';
-        return `${idx + 1}. 🎬 <b>${escapeHtml(item.title)}</b> (${year}) [${item.mediaType.toUpperCase()}]`;
+        return `${idx + 1}. 🎬 <b>${escapeHtml(item.title)}</b> (${year})`;
       })
       .join('\n');
 
     return ctx.replyWithHTML(`🆕 <b>Latest Titles in Database:</b>\n\n${list}`);
   } catch (error) {
-    console.error('Latest command error:', error);
-    return ctx.reply('डेटा लोड करने में समस्या आई। कृपया बाद में प्रयास करें।');
+    return ctx.reply('डेटा लोड करने में समस्या आई।');
   }
 });
 
@@ -174,9 +235,10 @@ const handleTitleSearch = async (ctx: any, query: string) => {
       return `${idx + 1}. 🎬 <b>${escapeHtml(item.title)}</b> (${year}) ${rating}`;
     });
 
-    return ctx.replyWithHTML(`🔎 <b>Search Results for "${escapeHtml(cleanQuery)}":</b>\n\n${responseLines.join('\n')}`);
+    return ctx.replyWithHTML(
+      `🔎 <b>Search Results for "${escapeHtml(cleanQuery)}":</b>\n\n${responseLines.join('\n')}`
+    );
   } catch (error) {
-    console.error('Search error:', error);
     return ctx.reply('खोजते समय त्रुटि हुई। कृपया पुनः प्रयास करें।');
   }
 };
