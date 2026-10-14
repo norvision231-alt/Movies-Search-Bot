@@ -8,6 +8,7 @@ const MediaItemSchema = new mongoose.Schema(
     originalTitle: { type: String, default: '' },
     originalLanguage: { type: String, default: '' },
     spokenLanguages: { type: [String], default: [] },
+    availableLanguages: { type: [String], default: [] },
     genres: { type: [String], default: [] },
     originCountries: { type: [String], default: [] },
     overview: { type: String, default: '' },
@@ -23,6 +24,9 @@ const MediaItemSchema = new mongoose.Schema(
     episodeCount: { type: Number, default: 0 },
     imdbId: { type: String, default: '' },
     isPublished: { type: Boolean, default: false },
+    userRequested: { type: Boolean, default: false },
+    requestedAt: { type: Date, default: null },
+    requestedBy: { type: [Number], default: [] },
     telegramMessageId: { type: Number, default: 0 },
     collectionMonth: { type: String, default: '' }
   },
@@ -31,7 +35,7 @@ const MediaItemSchema = new mongoose.Schema(
 
 MediaItemSchema.index({ tmdbId: 1, mediaType: 1 }, { unique: true });
 MediaItemSchema.index({ title: 1 });
-MediaItemSchema.index({ isPublished: 1, releaseDate: -1 });
+MediaItemSchema.index({ isPublished: 1, userRequested: -1, requestedAt: 1, releaseDate: -1 });
 
 const MonthJobSchema = new mongoose.Schema(
   {
@@ -86,3 +90,4 @@ export const MediaItem = mongoose.model<any>('MediaItem', MediaItemSchema);
 export const MonthJob = mongoose.model<any>('MonthJob', MonthJobSchema);
 export const AppSettings = mongoose.model<any>('AppSettings', AppSettingsSchema);
 export const BotUser = mongoose.model<any>('BotUser', BotUserSchema);
+// === END OF FILE ===
