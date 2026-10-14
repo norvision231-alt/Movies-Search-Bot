@@ -3,33 +3,19 @@ import axios from 'axios';
 const TMDB_BASE_URL = 'https://api.themoviedb.org/3';
 
 const GENRE_MAP: Record<number, string> = {
-  28: 'Action',
-  12: 'Adventure',
-  16: 'Animation',
-  35: 'Comedy',
-  80: 'Crime',
-  99: 'Documentary',
-  18: 'Drama',
-  10751: 'Family',
-  14: 'Fantasy',
-  36: 'History',
-  27: 'Horror',
-  10402: 'Music',
-  9648: 'Mystery',
-  10749: 'Romance',
-  878: 'Sci-Fi',
-  10770: 'TV Movie',
-  53: 'Thriller',
-  10752: 'War',
-  37: 'Western',
-  10759: 'Action & Adventure',
-  10762: 'Kids',
-  10763: 'News',
-  10764: 'Reality',
-  10765: 'Sci-Fi & Fantasy',
-  10766: 'Soap',
-  10767: 'Talk',
-  10768: 'War & Politics'
+  28: 'Action', 12: 'Adventure', 16: 'Animation', 35: 'Comedy', 80: 'Crime',
+  99: 'Documentary', 18: 'Drama', 10751: 'Family', 14: 'Fantasy', 36: 'History',
+  27: 'Horror', 10402: 'Music', 9648: 'Mystery', 10749: 'Romance', 878: 'Sci-Fi',
+  10770: 'TV Movie', 53: 'Thriller', 10752: 'War', 37: 'Western',
+  10759: 'Action & Adventure', 10762: 'Kids', 10763: 'News', 10764: 'Reality',
+  10765: 'Sci-Fi & Fantasy', 10766: 'Soap', 10767: 'Talk', 10768: 'War & Politics'
+};
+
+export const LANG_NAME_MAP: Record<string, string> = {
+  hi: 'Hindi', en: 'English', ta: 'Tamil', te: 'Telugu', ml: 'Malayalam', kn: 'Kannada',
+  bn: 'Bengali', mr: 'Marathi', pa: 'Punjabi', gu: 'Gujarati', ur: 'Urdu', ko: 'Korean',
+  ja: 'Japanese', zh: 'Chinese', es: 'Spanish', fr: 'French', de: 'German', it: 'Italian',
+  ru: 'Russian', pt: 'Portuguese', tr: 'Turkish', th: 'Thai', id: 'Indonesian', ar: 'Arabic'
 };
 
 export const mapGenreIds = (ids: number[] = []): string[] => {
@@ -69,8 +55,38 @@ const getAuthConfig = (extraParams: Record<string, any> = {}) => {
   } else {
     params.api_key = token;
   }
-
   return { headers, params };
+};
+
+export const extractAvailableLanguages = (details: any, originalLangCode: string = ''): string[] => {
+  const langSet = new Set<string>();
+  const origCode = String(originalLangCode || details?.original_language || '').toLowerCase();
+  if (origCode && LANG_NAME_MAP[origCode]) {
+    langSet.add(LANG_NAME_MAP[origCode]);
+  }
+
+  if (Array.isArray(details?.spoken_languages)) {
+    for (const l of details.spoken_languages) {
+      const code = String(l.iso_639_1 || '').toLowerCase();
+      const name = LANG_NAME_MAP[code] || l.english_name || l.name;
+      if (name) langSet.add(name);
+    }
+  }
+
+  // Check official TMDB translations (prioritizing Indian & Major Global languages)
+  const priorityCodes = ['hi', 'en', 'ta', 'te', 'ml', 'kn', 'bn', 'mr', 'pa', 'es', 'fr', 'ko', 'ja'];
+  const transList = details?.translations?.translations;
+  if (Array.isArray(transList)) {
+    for (const t of transList) {
+      const code = String(t.iso_639_1 || '').toLowerCase();
+      if (priorityCodes.includes(code) && LANG_NAME_MAP[code]) {
+        langSet.add(LANG_NAME_MAP[code]);
+      }
+    }
+  }
+
+  const list = Array.from(langSet);
+  return list.length > 0 ? list.slice(0, 6) : ['English'];
 };
 
 export const fetchTMDBDiscover = async (
@@ -111,7 +127,7 @@ export const fetchTMDBDetails = async (
   mediaType: 'movie' | 'tv' = 'movie'
 ): Promise<any> => {
   const { headers, params } = getAuthConfig({
-    append_to_response: 'external_ids'
+    append_to_response: 'external_ids,translations'
   });
 
   try {
@@ -148,28 +164,62 @@ export const searchTMDBMulti = async (query: string): Promise<any[]> => {
   }
 };
 
-// AI Fallback using DeepSeek or ChatGPT (OpenAI) when TMDB metadata is incomplete
+// AI Spell Correction for user typos (e.g., "Sta good" -> "Stay Good")
+export const suggestCorrectTitleWithAI = async (typoQuery: string): Promise<string> => {
+  const deepseekKey = (process.env.DEEPSEEK_API_KEY || '').trim();
+  const chatgptKey = (process.env.CHATGPT_API_KEY || process.env.OPENAI_API_KEY || '').trim();
+  const apiKey = deepseekKey || chatgptKey;
+  if (!apiKey) return '';
+
+  const prompt = `The user typed a possibly misspelled movie or web-series title: "${typoQuery}". Return ONLY the corrected official movie/series title in plain text (nothing else, no quotes).`;
+
+  const callAI = async (url: string, key: string, model: string) => {
+    const res = await axios.post(
+      url,
+      {
+        model,
+        messages: [{ role: 'user', content: prompt }],
+        temperature: 0.1,
+        max_tokens: 30
+      },
+      { headers: { Authorization: `Bearer ${key}` }, timeout: 8000 }
+    );
+    return String(res.data?.choices?.[0]?.message?.content || '').replace(/["']/g, '').trim();
+  };
+
+  try {
+    if (deepseekKey) {
+      return await callAI('https://api.deepseek.com/v1/chat/completions', deepseekKey, 'deepseek-chat');
+    }
+    return await callAI('https://api.openai.com/v1/chat/completions', chatgptKey, 'gpt-4o-mini');
+  } catch (_e) {
+    try {
+      return await callAI('https://api.deepseek.com/v1/chat/completions', chatgptKey, 'deepseek-chat');
+    } catch (_e2) {
+      return '';
+    }
+  }
+};
+
 export const enrichWithAI = async (media: any): Promise<any> => {
   const deepseekKey = (process.env.DEEPSEEK_API_KEY || '').trim();
   const chatgptKey = (process.env.CHATGPT_API_KEY || process.env.OPENAI_API_KEY || '').trim();
-
   if (!deepseekKey && !chatgptKey) return media;
 
   const year = media.releaseDate ? String(media.releaseDate).substring(0, 4) : 'Recent';
-  const prompt = `You are a movie database assistant. Provide accurate English metadata for the ${
+  const prompt = `Provide accurate English metadata for the ${
     media.mediaType === 'tv' ? 'TV Series' : 'Movie'
   } titled "${media.title}" (${year}), original language "${media.originalLanguage || 'en'}".
-Existing overview: "${media.overview || 'None'}".
-Return ONLY a valid JSON object with these keys:
+Return ONLY a valid JSON object:
 {
-  "overview": "A catchy, engaging 2-sentence English synopsis (max 220 characters)",
+  "overview": "A catchy 2-sentence English synopsis (max 220 chars)",
   "genres": ["Genre1", "Genre2"],
+  "availableLanguages": ["English", "Hindi"],
   "runtime": 120,
   "seasonCount": 1,
   "imdbRating": "7.5/10",
   "rtRating": "86%"
-}
-If IMDb or RT rating is unknown for an upcoming release, return "" for those fields.`;
+}`;
 
   const callProvider = async (url: string, apiKey: string, model: string) => {
     const res = await axios.post(
@@ -177,19 +227,13 @@ If IMDb or RT rating is unknown for an upcoming release, return "" for those fie
       {
         model,
         messages: [
-          { role: 'system', content: 'Always respond with valid raw JSON only.' },
+          { role: 'system', content: 'Respond with valid raw JSON only.' },
           { role: 'user', content: prompt }
         ],
         temperature: 0.3,
         max_tokens: 300
       },
-      {
-        headers: {
-          Authorization: `Bearer ${apiKey}`,
-          'Content-Type': 'application/json'
-        },
-        timeout: 15000
-      }
+      { headers: { Authorization: `Bearer ${apiKey}` }, timeout: 15000 }
     );
     const content = res.data?.choices?.[0]?.message?.content || '';
     const jsonMatch = content.match(/\{[\s\S]*\}/);
@@ -197,30 +241,19 @@ If IMDb or RT rating is unknown for an upcoming release, return "" for those fie
   };
 
   let aiData: any = null;
-
-  // 1. Try DeepSeek if configured
   if (deepseekKey) {
     try {
       const baseUrl = (process.env.DEEPSEEK_BASE_URL || 'https://api.deepseek.com').replace(/\/$/, '');
-      const model = (process.env.DEEPSEEK_MODEL || 'deepseek-chat').trim();
-      aiData = await callProvider(`${baseUrl}/v1/chat/completions`, deepseekKey, model);
-    } catch (e: any) {
-      console.error('DeepSeek AI fallback notice:', e?.message);
-    }
+      aiData = await callProvider(`${baseUrl}/v1/chat/completions`, deepseekKey, process.env.DEEPSEEK_MODEL || 'deepseek-chat');
+    } catch (_e) {}
   }
-
-  // 2. Try ChatGPT / OpenAI if DeepSeek wasn't used or failed
   if (!aiData && chatgptKey) {
     try {
-      const model = (process.env.OPENAI_MODEL || 'gpt-4o-mini').trim();
-      aiData = await callProvider('https://api.openai.com/v1/chat/completions', chatgptKey, model);
-    } catch (e: any) {
-      // In case CHATGPT_API_KEY is actually a DeepSeek key, try DeepSeek endpoint automatically
+      aiData = await callProvider('https://api.openai.com/v1/chat/completions', chatgptKey, process.env.OPENAI_MODEL || 'gpt-4o-mini');
+    } catch (_e) {
       try {
         aiData = await callProvider('https://api.deepseek.com/v1/chat/completions', chatgptKey, 'deepseek-chat');
-      } catch (_err) {
-        console.error('ChatGPT fallback notice:', e?.message);
-      }
+      } catch (_e2) {}
     }
   }
 
@@ -230,6 +263,9 @@ If IMDb or RT rating is unknown for an upcoming release, return "" for those fie
     }
     if ((!Array.isArray(media.genres) || media.genres.length === 0) && Array.isArray(aiData.genres)) {
       media.genres = aiData.genres.map((g: any) => String(g));
+    }
+    if ((!Array.isArray(media.availableLanguages) || media.availableLanguages.length <= 1) && Array.isArray(aiData.availableLanguages)) {
+      media.availableLanguages = aiData.availableLanguages.map((l: any) => String(l));
     }
     if (!media.runtime && Number(aiData.runtime) > 0) {
       media.runtime = Number(aiData.runtime);
@@ -244,6 +280,6 @@ If IMDb or RT rating is unknown for an upcoming release, return "" for those fie
       media.rtRating = String(aiData.rtRating);
     }
   }
-
   return media;
 };
+// === END OF FILE ===
