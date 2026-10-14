@@ -1,4 +1,5 @@
 import cron from 'node-cron';
+import mongoose from 'mongoose';
 import {
   fetchTMDBDiscover,
   fetchTMDBDetails,
@@ -8,7 +9,7 @@ import {
   extractAvailableLanguages,
   enrichWithAI
 } from '../services/tmdb';
-import { MediaItem, MonthJob, AppSettings } from '../database/models';
+import { MediaItem, PostedHistory, MonthJob, AppSettings } from '../database/models';
 import {
   bot,
   formatCaption,
@@ -19,6 +20,40 @@ import {
 } from '../bot/telegram';
 
 let isJobRunning = false;
+
+// Smart Auto-Pruning: Check if MongoDB storage > 90% (~460MB of 512MB free tier), delete 80% of oldest posted movies
+const checkAndPruneStorageIfNeeded = async () => {
+  try {
+    const adminDb = mongoose.connection.db?.admin();
+    if (!adminDb) return;
+    const stats = await mongoose.connection.db.stats();
+    const storageSizeMB = (stats.storageSize || 0) / (1024 * 1024);
+
+    // If storage exceeds 460 MB (~90% of 512 MB free tier limit)
+    if (storageSizeMB >= 460) {
+      console.log(`⚠️ MongoDB storage is at ${storageSizeMB.toFixed(2)} MB (>=90%). Pruning old posted movies...`);
+      
+      const publishedItems = await MediaItem.find({ isPublished: true }).sort({ createdAt: 1 });
+      const countToDelete = Math.floor(publishedItems.length * 0.8);
+
+      if (countToDelete > 0) {
+        const itemsToRemove = publishedItems.slice(0, countToDelete);
+        for (const itm of itemsToRemove) {
+          // Ensure tmdbId is permanently recorded in PostedHistory before deleting main document
+          await PostedHistory.updateOne(
+            { tmdbId: itm.tmdbId, mediaType: itm.mediaType },
+            { $set: { tmdbId: itm.tmdbId, mediaType: itm.mediaType } },
+            { upsert: true }
+          );
+          await MediaItem.deleteOne({ _id: itm._id });
+        }
+        console.log(`🧹 Successfully pruned ${countToDelete} old posted movies to free up database storage.`);
+      }
+    }
+  } catch (err: any) {
+    console.error('Storage Prune Check Error:', err?.message);
+  }
+};
 
 export const enrichMediaItemWithDetails = async (item: any, aiEnabled = true): Promise<any> => {
   const mediaType: 'movie' | 'tv' = item.mediaType === 'tv' ? 'tv' : 'movie';
@@ -68,6 +103,9 @@ export const runWorkerCycle = async (forceNow = false): Promise<void> => {
   isJobRunning = true;
 
   try {
+    // Check storage limits before running seeding/publishing
+    await checkAndPruneStorageIfNeeded();
+
     let settings: any = await AppSettings.findOne({ key: 'global' });
     if (!settings) settings = await AppSettings.create({ key: 'global' });
 
@@ -120,6 +158,11 @@ export const runWorkerCycle = async (forceNow = false): Promise<void> => {
         if (data && Array.isArray(data.results)) {
           for (const item of data.results) {
             if (!item.poster_path) continue;
+            
+            // Skip if already in permanent PostedHistory
+            const alreadyPosted = await PostedHistory.findOne({ tmdbId: item.id, mediaType });
+            if (alreadyPosted) continue;
+
             await MediaItem.updateOne(
               { tmdbId: item.id, mediaType },
               {
@@ -164,7 +207,7 @@ export const runWorkerCycle = async (forceNow = false): Promise<void> => {
       }
     }
 
-    // 2. AUTO PUBLISHING (Prioritize User-Searched Movies First!)
+    // 2. AUTO PUBLISHING
     const targetChannel = getTargetChannel();
     if (settings.autoPublishEnabled && targetChannel) {
       let pendingItem: any = await MediaItem.findOne({
@@ -181,6 +224,14 @@ export const runWorkerCycle = async (forceNow = false): Promise<void> => {
       }
 
       if (pendingItem) {
+        // Double check against PostedHistory
+        const alreadyDone = await PostedHistory.findOne({ tmdbId: pendingItem.tmdbId, mediaType: pendingItem.mediaType });
+        if (alreadyDone) {
+          pendingItem.isPublished = true;
+          await pendingItem.save();
+          return;
+        }
+
         pendingItem = await enrichMediaItemWithDetails(pendingItem, settings.aiEnabled !== false);
         const caption = formatCaption(pendingItem, settings);
         const posterUrl = pendingItem.posterPath
@@ -196,11 +247,17 @@ export const runWorkerCycle = async (forceNow = false): Promise<void> => {
           pendingItem.telegramMessageId = sentMsg?.message_id || 0;
           await pendingItem.save();
 
+          // Save to permanent PostedHistory so duplicate posts are blocked forever
+          await PostedHistory.updateOne(
+            { tmdbId: pendingItem.tmdbId, mediaType: pendingItem.mediaType },
+            { $set: { tmdbId: pendingItem.tmdbId, mediaType: pendingItem.mediaType } },
+            { upsert: true }
+          );
+
           settings.lastPublishAt = new Date();
           await settings.save();
-          console.log(`Published: ${pendingItem.title}`);
+          console.log(`Published & recorded in history: ${pendingItem.title}`);
 
-          // Notify users who searched/requested this movie that it is now LIVE on the channel
           if (Array.isArray(pendingItem.requestedBy) && pendingItem.requestedBy.length > 0) {
             const c1 = settings.channel01Url || 'https://t.me/yourchannel1';
             for (const uid of pendingItem.requestedBy) {
