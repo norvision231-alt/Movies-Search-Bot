@@ -43,7 +43,6 @@ export const escapeHtml = (unsafe: string = ''): string => {
     .replace(/"/g, '&quot;');
 };
 
-// Format minutes into "2 hours 30 min" or "45 min"
 export const formatRuntimeHoursMins = (totalMinutes?: number): string => {
   const mins = Number(totalMinutes || 0);
   if (!mins || mins <= 0) return '';
@@ -85,7 +84,6 @@ export const getDisplayLanguages = (media: any): string => {
   return String(media.originalLanguage || 'English').toUpperCase();
 };
 
-// Clean Caption with Available Languages, Hours/Mins Runtime & Embedded Text Links
 export const formatCaption = (media: any, settings: any, extraFooterHtml = ''): string => {
   const title = escapeHtml(media.title || 'Untitled');
   const year = media.releaseDate ? escapeHtml(String(media.releaseDate).substring(0, 4)) : 'N/A';
@@ -193,7 +191,6 @@ export const notifyAdminError = async (source: string, error: any, fixHint = '')
   }
 };
 
-// Enqueue unposted movie for priority channel auto-posting & return countdown timer HTML
 const queueMovieForChannelAndGetTimer = async (item: any, userId?: number, settings?: any): Promise<string> => {
   if (item.isPublished) {
     return `✅ <b>Channel Status:</b> Already Published on Channel!`;
@@ -254,7 +251,6 @@ export const sendMediaCardToChat = async (ctx: any, item: any) => {
   return ctx.replyWithHTML(caption, { link_preview_options: { is_disabled: true } } as any);
 };
 
-// Levenshtein / Fuzzy Similarity Score between 0 and 1
 const calcSimilarity = (a: string, b: string): number => {
   const s1 = a.toLowerCase().replace(/[^a-z0-9\s]/g, '').trim();
   const s2 = b.toLowerCase().replace(/[^a-z0-9\s]/g, '').trim();
@@ -563,7 +559,7 @@ bot.command('status', async (ctx) => {
 bot.command('latest', async (ctx) => {
   const items = await MediaItem.find().sort({ releaseDate: -1 }).limit(10);
   if (items.length === 0) return ctx.reply('No titles yet.');
-  const buttons = items.map((item: any, i: number) => [
+  const buttons: any[] = items.map((item: any, i: number) => [
     Markup.button.callback(`${i + 1}. 🎬 ${item.title} (${item.releaseDate ? String(item.releaseDate).substring(0, 4) : 'N/A'})`, `view_${item._id}`)
   ]);
   return ctx.replyWithHTML('🆕 <b>Latest Titles:</b>', Markup.inlineKeyboard(buttons));
@@ -631,7 +627,6 @@ const saveTMDBHitsToDB = async (hits: any[]) => {
   }
 };
 
-// Smart Search with Exact, Fuzzy/Typo Tolerance, Spelling Guide & Google Search Link
 const handleTitleSearch = async (ctx: any, rawQuery: string) => {
   const cleanQuery = rawQuery.replace(/^\d+\.\s*/, '').replace(/🎬/g, '').replace(/\(\d{4}\)\s*$/, '').trim();
   if (!cleanQuery || cleanQuery.length < 2) {
@@ -652,11 +647,9 @@ const handleTitleSearch = async (ctx: any, rawQuery: string) => {
     let usedFuzzyOrSpellingFix = false;
     let suggestedTitle = '';
 
-    // 1. Try direct TMDB search if not in local DB
     if (results.length === 0) {
       let liveHits = await searchTMDBMulti(cleanQuery);
 
-      // 2. If TMDB also returned 0 (user made a typo like "Sta good"), try word split & AI spell correction
       if (liveHits.length === 0) {
         usedFuzzyOrSpellingFix = true;
         const words = cleanQuery.split(/\s+/).filter((w) => w.length >= 3);
@@ -677,7 +670,6 @@ const handleTitleSearch = async (ctx: any, rawQuery: string) => {
         await saveTMDBHitsToDB(liveHits);
       }
 
-      // 3. Re-query local DB or run Fuzzy Similarity matching across DB titles
       results = await MediaItem.find({ title: { $regex: escaped,$options: 'i' } })
         .sort({ voteCount: -1, releaseDate: -1 })
         .limit(8);
@@ -701,7 +693,6 @@ const handleTitleSearch = async (ctx: any, rawQuery: string) => {
       }
     }
 
-    // No match even after fuzzy & AI -> Show Spelling Format Guide + Google Search Redirect Button
     if (results.length === 0) {
       return ctx.replyWithHTML(
         `❌ <b>No exact match found for "${escapeHtml(cleanQuery)}"</b>\n\n` +
@@ -715,13 +706,12 @@ const handleTitleSearch = async (ctx: any, rawQuery: string) => {
       );
     }
 
-    // Exact single match -> Enrich, Queue for Channel Auto-Post with Timer & Send Card
     if (results.length === 1 && !usedFuzzyOrSpellingFix) {
       let item: any = await enrichItemFull(results[0]);
       return sendMediaCardToChat(ctx, item);
     }
 
-    const buttons = results.map((item: any) => {
+    const buttons: any[] = results.map((item: any) => {
       const year = item.releaseDate ? String(item.releaseDate).substring(0, 4) : 'N/A';
       const statusIcon = item.isPublished ? '✅' : '⏳';
       return [
@@ -732,7 +722,6 @@ const handleTitleSearch = async (ctx: any, rawQuery: string) => {
       ];
     });
 
-    // Always attach Google Spell-Check Redirect button at the bottom of search lists
     buttons.push([Markup.button.url(`🔎 Not here? Check "${cleanQuery}" on Google`, googleUrl)]);
 
     const headerText = usedFuzzyOrSpellingFix
