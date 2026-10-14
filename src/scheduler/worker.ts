@@ -4,7 +4,6 @@ import { MediaItem, MonthJob, AppSettings } from '../database/models';
 import { bot, formatCaption, sendToLogChannel } from '../bot/telegram';
 
 export const startCronJobs = () => {
-  // Runs every 20 minutes
   cron.schedule('*/20 * * * *', async () => {
     console.log("Running 20-minute Cron Job (Seeding & Publishing)...");
     
@@ -16,21 +15,18 @@ export const startCronJobs = () => {
     try {
       // 1. AUTO SEEDING (TMDB Crawl)
       if (settings.autoSeedingEnabled) {
-        // Example logic: Find the active month job
         let activeJob = await MonthJob.findOne({ status: { $ne: 'COMPLETED' } }).sort({ month: -1 });
         if (!activeJob) {
-          // Initialize default month if no jobs exist
           activeJob = await MonthJob.create({ month: "2026-10", status: 'RUNNING' });
           await sendToLogChannel(`🔄 Started new seeding month: <b>${activeJob.month}</b>`);
         }
 
         const startDate = `${activeJob.month}-01`;
-        const endDate = `${activeJob.month}-31`; // Simplified
+        const endDate = `${activeJob.month}-31`;
 
         const data = await fetchTMDBDiscover(startDate, endDate, activeJob.currentPage);
         
         if (data && data.results) {
-          let upsertCount = 0;
           for (const item of data.results) {
             await MediaItem.updateOne(
               { tmdbId: item.id, mediaType: 'movie' },
@@ -45,7 +41,6 @@ export const startCronJobs = () => {
               }},
               { upsert: true }
             );
-            upsertCount++;
           }
 
           if (activeJob.currentPage >= data.total_pages) {
@@ -60,7 +55,6 @@ export const startCronJobs = () => {
 
       // 2. AUTO PUBLISHING
       if (settings.autoPublishEnabled && process.env.LOG_CHANNEL) {
-        // Find one completed and unpublished item from the database
         const pendingItem = await MediaItem.findOne({ isPublished: false }).sort({ releaseDate: -1 });
         
         if (pendingItem) {
@@ -80,7 +74,6 @@ export const startCronJobs = () => {
 
           pendingItem.isPublished = true;
           await pendingItem.save();
-          console.log(`Published: ${pendingItem.title}`);
         }
       }
 
