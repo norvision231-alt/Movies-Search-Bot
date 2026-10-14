@@ -11,13 +11,13 @@ const MediaItemSchema = new mongoose.Schema({
   releaseDate: String,
   tmdbRating: Number,
   isPublished: { type: Boolean, default: false },
-  collectionMonth: String // e.g., "2026-10"
+  collectionMonth: String
 }, { timestamps: true });
 
 MediaItemSchema.index({ tmdbId: 1, mediaType: 1 }, { unique: true });
 
 const MonthJobSchema = new mongoose.Schema({
-  month: { type: String, required: true, unique: true }, // e.g., "2026-10"
+  month: { type: String, required: true, unique: true },
   currentPage: { type: Number, default: 1 },
   totalPages: { type: Number, default: 1 },
   status: { type: String, enum: ['PENDING', 'RUNNING', 'COMPLETED'], default: 'PENDING' }
