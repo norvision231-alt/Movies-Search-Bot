@@ -18,9 +18,18 @@ const GENRE_MAP: Record<number, string> = {
   9648: 'Mystery',
   10749: 'Romance',
   878: 'Sci-Fi',
+  10770: 'TV Movie',
   53: 'Thriller',
   10752: 'War',
-  37: 'Western'
+  37: 'Western',
+  10759: 'Action & Adventure',
+  10762: 'Kids',
+  10763: 'News',
+  10764: 'Reality',
+  10765: 'Sci-Fi & Fantasy',
+  10766: 'Soap',
+  10767: 'Talk',
+  10768: 'War & Politics'
 };
 
 export const mapGenreIds = (ids: number[] = []): string[] => {
@@ -32,11 +41,9 @@ export const getMonthDateRange = (monthStr: string): { startDate: string; endDat
   const year = Number(yearStr);
   const month = Number(monStr);
   const lastDay = new Date(year, month, 0).getDate();
-  const paddedMonth = String(month).padStart(2, '0');
-  const paddedDay = String(lastDay).padStart(2, '0');
   return {
-    startDate: `${year}-${paddedMonth}-01`,
-    endDate: `${year}-${paddedMonth}-${paddedDay}`
+    startDate: `${year}-${String(month).padStart(2, '0')}-01`,
+    endDate: `${year}-${String(month).padStart(2, '0')}-${String(lastDay).padStart(2, '0')}`
   };
 };
 
@@ -51,26 +58,11 @@ export const getPreviousMonth = (monthStr: string): string => {
   return `${year}-${String(month).padStart(2, '0')}`;
 };
 
-export const fetchTMDBDiscover = async (
-  monthStart: string,
-  monthEnd: string,
-  page: number = 1
-): Promise<any> => {
+const getAuthConfig = (extraParams: Record<string, any> = {}) => {
   const token = (process.env.TMDB_API_TOKEN || process.env.TMDB_ACCESS_TOKEN || '').trim();
-  if (!token) {
-    console.error('TMDB_API_TOKEN is missing');
-    return null;
-  }
-
   const isBearer = token.startsWith('eyJ');
   const headers: Record<string, string> = { accept: 'application/json' };
-  const params: Record<string, any> = {
-    'primary_release_date.gte': monthStart,
-    'primary_release_date.lte': monthEnd,
-    page,
-    sort_by: 'primary_release_date.desc',
-    include_adult: false
-  };
+  const params: Record<string, any> = { ...extraParams };
 
   if (isBearer) {
     headers.Authorization = `Bearer ${token}`;
@@ -78,15 +70,80 @@ export const fetchTMDBDiscover = async (
     params.api_key = token;
   }
 
+  return { headers, params };
+};
+
+export const fetchTMDBDiscover = async (
+  monthStart: string,
+  monthEnd: string,
+  page: number = 1,
+  mediaType: 'movie' | 'tv' = 'movie',
+  allowedLanguages: string = 'hi|en|ta|te|ml|kn'
+): Promise<any> => {
+  const dateFieldGte = mediaType === 'tv' ? 'first_air_date.gte' : 'primary_release_date.gte';
+  const dateFieldLte = mediaType === 'tv' ? 'first_air_date.lte' : 'primary_release_date.lte';
+  const sortBy = mediaType === 'tv' ? 'first_air_date.desc' : 'primary_release_date.desc';
+
+  const { headers, params } = getAuthConfig({
+    [dateFieldGte]: monthStart,
+    [dateFieldLte]: monthEnd,
+    with_original_language: allowedLanguages.replace(/,/g, '|'),
+    page,
+    sort_by: sortBy,
+    include_adult: false
+  });
+
   try {
-    const response = await axios.get(`${TMDB_BASE_URL}/discover/movie`, {
+    const response = await axios.get(`${TMDB_BASE_URL}/discover/${mediaType}`, {
       headers,
       params,
       timeout: 15000
     });
     return response.data;
   } catch (error: any) {
-    console.error('TMDB Fetch Error:', error?.response?.status || error?.message);
+    console.error('TMDB Discover Error:', error?.response?.status || error?.message);
     return null;
+  }
+};
+
+export const fetchTMDBDetails = async (
+  tmdbId: number,
+  mediaType: 'movie' | 'tv' = 'movie'
+): Promise<any> => {
+  const { headers, params } = getAuthConfig({
+    append_to_response: 'external_ids'
+  });
+
+  try {
+    const response = await axios.get(`${TMDB_BASE_URL}/${mediaType}/${tmdbId}`, {
+      headers,
+      params,
+      timeout: 12000
+    });
+    return response.data;
+  } catch (error: any) {
+    console.error(`TMDB Details Error (${mediaType}/${tmdbId}):`, error?.message);
+    return null;
+  }
+};
+
+export const searchTMDBMulti = async (query: string): Promise<any[]> => {
+  const { headers, params } = getAuthConfig({
+    query,
+    include_adult: false,
+    page: 1
+  });
+
+  try {
+    const response = await axios.get(`${TMDB_BASE_URL}/search/multi`, {
+      headers,
+      params,
+      timeout: 12000
+    });
+    const results = response.data?.results || [];
+    return results.filter((r: any) => r.media_type === 'movie' || r.media_type === 'tv');
+  } catch (error: any) {
+    console.error('TMDB Search Error:', error?.message);
+    return [];
   }
 };
