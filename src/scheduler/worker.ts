@@ -5,16 +5,17 @@ import {
   getMonthDateRange,
   getPreviousMonth,
   mapGenreIds,
+  extractAvailableLanguages,
   enrichWithAI
 } from '../services/tmdb';
 import { MediaItem, MonthJob, AppSettings } from '../database/models';
 import {
   bot,
   formatCaption,
-  buildPostKeyboard,
   notifyAdminError,
   getTargetChannel,
-  registerWorkerTrigger
+  registerWorkerTrigger,
+  escapeHtml
 } from '../bot/telegram';
 
 let isJobRunning = false;
@@ -35,6 +36,7 @@ export const enrichMediaItemWithDetails = async (item: any, aiEnabled = true): P
     item.seasonCount = details.number_of_seasons || item.seasonCount || 0;
     item.episodeCount = details.number_of_episodes || item.episodeCount || 0;
     item.imdbId = details.external_ids?.imdb_id || details.imdb_id || item.imdbId || '';
+    item.availableLanguages = extractAvailableLanguages(details, item.originalLanguage);
     if (Array.isArray(details.spoken_languages)) {
       item.spokenLanguages = details.spoken_languages
         .map((l: any) => l.english_name || l.name)
@@ -83,6 +85,7 @@ export const runWorkerCycle = async (forceNow = false): Promise<void> => {
       .map((s: string) => s.trim().toLowerCase())
       .filter(Boolean);
 
+    // 1. AUTO SEEDING
     if (settings.autoSeedingEnabled) {
       let activeJob: any = await MonthJob.findOne({ status: { $ne: 'COMPLETED' } }).sort({ month: -1 });
 
@@ -161,26 +164,33 @@ export const runWorkerCycle = async (forceNow = false): Promise<void> => {
       }
     }
 
+    // 2. AUTO PUBLISHING (Prioritize User-Searched Movies First!)
     const targetChannel = getTargetChannel();
     if (settings.autoPublishEnabled && targetChannel) {
       let pendingItem: any = await MediaItem.findOne({
         isPublished: false,
-        originalLanguage: { $in: allowedLangs },
-        posterPath: { $ne: '' }
-      }).sort({ releaseDate: -1, voteCount: -1 });
+        userRequested: true
+      }).sort({ requestedAt: 1 });
+
+      if (!pendingItem) {
+        pendingItem = await MediaItem.findOne({
+          isPublished: false,
+          originalLanguage: { $in: allowedLangs },
+          posterPath: { $ne: '' }
+        }).sort({ releaseDate: -1, voteCount: -1 });
+      }
 
       if (pendingItem) {
         pendingItem = await enrichMediaItemWithDetails(pendingItem, settings.aiEnabled !== false);
         const caption = formatCaption(pendingItem, settings);
-        const keyboard = buildPostKeyboard(settings);
         const posterUrl = pendingItem.posterPath
           ? `https://image.tmdb.org/t/p/w500${pendingItem.posterPath}`
           : null;
 
         try {
           const sentMsg: any = posterUrl
-            ? await bot.telegram.sendPhoto(targetChannel, posterUrl, { caption, parse_mode: 'HTML', ...keyboard })
-            : await bot.telegram.sendMessage(targetChannel, caption, { parse_mode: 'HTML', ...keyboard });
+            ? await bot.telegram.sendPhoto(targetChannel, posterUrl, { caption, parse_mode: 'HTML' })
+            : await bot.telegram.sendMessage(targetChannel, caption, { parse_mode: 'HTML' });
 
           pendingItem.isPublished = true;
           pendingItem.telegramMessageId = sentMsg?.message_id || 0;
@@ -189,6 +199,20 @@ export const runWorkerCycle = async (forceNow = false): Promise<void> => {
           settings.lastPublishAt = new Date();
           await settings.save();
           console.log(`Published: ${pendingItem.title}`);
+
+          // Notify users who searched/requested this movie that it is now LIVE on the channel
+          if (Array.isArray(pendingItem.requestedBy) && pendingItem.requestedBy.length > 0) {
+            const c1 = settings.channel01Url || 'https://t.me/yourchannel1';
+            for (const uid of pendingItem.requestedBy) {
+              try {
+                await bot.telegram.sendMessage(
+                  uid,
+                  `🎉 <b>Good News!</b> Your requested title <b>${escapeHtml(pendingItem.title)}</b> has just been published to our channel!\n\n👉 <a href="${escapeHtml(c1)}"><b>VIEW ON CHANNEL NOW</b></a>`,
+                  { parse_mode: 'HTML' }
+                );
+              } catch (_notifyErr) {}
+            }
+          }
         } catch (postErr: any) {
           console.error('Post send error:', postErr?.message);
           await notifyAdminError('Telegram Publisher', postErr, 'Ensure bot is Admin in LOG_CHANNEL.');
