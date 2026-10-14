@@ -1,5 +1,5 @@
 import { Telegraf, Markup } from 'telegraf';
-import { MediaItem, MonthJob, AppSettings, BotUser } from '../database/models';
+import { MediaItem, MonthJob, AppSettings, BotUser, PostedHistory } from '../database/models';
 import {
   searchTMDBMulti,
   fetchTMDBDetails,
@@ -192,7 +192,9 @@ export const notifyAdminError = async (source: string, error: any, fixHint = '')
 };
 
 const queueMovieForChannelAndGetTimer = async (item: any, userId?: number, settings?: any): Promise<string> => {
-  if (item.isPublished) {
+  // Check both document status and permanent PostedHistory
+  const alreadyPosted = item.isPublished || (await PostedHistory.findOne({ tmdbId: item.tmdbId, mediaType: item.mediaType }));
+  if (alreadyPosted) {
     return `✅ <b>Channel Status:</b> Already Published on Channel!`;
   }
 
@@ -597,6 +599,10 @@ bot.action(/^view_(.+)$/, async (ctx) => {
 const saveTMDBHitsToDB = async (hits: any[]) => {
   for (const hit of hits.slice(0, 5)) {
     const mediaType: 'movie' | 'tv' = hit.media_type === 'tv' ? 'tv' : 'movie';
+    // Check PostedHistory so we don't re-insert already fully-processed items
+    const alreadyDone = await PostedHistory.findOne({ tmdbId: hit.id, mediaType });
+    if (alreadyDone) continue;
+
     const d = await fetchTMDBDetails(hit.id, mediaType);
     const availLangs = extractAvailableLanguages(d, hit.original_language);
     const doc: any = await MediaItem.findOneAndUpdate(
