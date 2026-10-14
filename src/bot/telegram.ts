@@ -1,21 +1,32 @@
 import { Telegraf, Markup } from 'telegraf';
-import { MediaItem, MonthJob, AppSettings } from '../database/models';
-import { searchTMDBMulti, fetchTMDBDetails, mapGenreIds } from '../services/tmdb';
+import { MediaItem, MonthJob, AppSettings, BotUser } from '../database/models';
+import { searchTMDBMulti, fetchTMDBDetails, mapGenreIds, enrichWithAI } from '../services/tmdb';
 
 const token = (process.env.BOT_TOKEN || process.env.TELEGRAM_BOT_TOKEN || '').trim();
 if (!token) throw new Error('BOT_TOKEN is missing');
 
 export const bot = new Telegraf(token);
 
+let triggerWorkerNow: (() => Promise<void>) | null = null;
+export const registerWorkerTrigger = (fn: () => Promise<void>) => {
+  triggerWorkerNow = fn;
+};
+
+// Track interactive admin prompts (Set Links, Broadcast, Ban/Unban, Set Time)
+const adminSession = new Map<number, { step: string }>();
+
 export const getTargetChannel = (): string => {
   return (process.env.LOG_CHANNEL || process.env.TELEGRAM_MAIN_CHANNEL_ID || '').trim();
 };
 
+export const getAdminIds = (): string[] => {
+  const adminEnv = (process.env.ADMIN_ID || process.env.ADMIN_TELEGRAM_IDS || '').trim();
+  return adminEnv.split(',').map((id: string) => id.trim()).filter(Boolean);
+};
+
 export const isAdmin = (userId?: number): boolean => {
   if (!userId) return false;
-  const adminEnv = (process.env.ADMIN_ID || process.env.ADMIN_TELEGRAM_IDS || '').trim();
-  const adminIds = adminEnv.split(',').map((id) => id.trim()).filter(Boolean);
-  return adminIds.includes(String(userId));
+  return getAdminIds().includes(String(userId));
 };
 
 export const escapeHtml = (unsafe: string = ''): string => {
@@ -27,12 +38,12 @@ export const escapeHtml = (unsafe: string = ''): string => {
 };
 
 const LANGUAGE_NAMES: Record<string, string> = {
-  hi: 'Hindi (हिंदी)',
+  hi: 'Hindi',
   en: 'English',
-  ta: 'Tamil (தமிழ்)',
-  te: 'Telugu (తెలుగు)',
-  ml: 'Malayalam (മലയാളം)',
-  kn: 'Kannada (ಕನ್ನಡ)',
+  ta: 'Tamil',
+  te: 'Telugu',
+  ml: 'Malayalam',
+  kn: 'Kannada',
   bn: 'Bengali',
   mr: 'Marathi',
   pa: 'Punjabi',
@@ -71,47 +82,48 @@ const createSeoHashtags = (media: any, langName: string): string => {
   const genreTags = Array.isArray(media.genres)
     ? media.genres
         .slice(0, 3)
-        .map((g: string) => `#${g.replace(/[^a-zA-Z0-9]/g, '')}`)
+        .map((g: string) => `#${String(g).replace(/[^a-zA-Z0-9]/g, '')}`)
         .join(' ')
     : '';
 
   return [
     cleanTitle ? `#${cleanTitle}` : '',
     year ? `#Release${year}` : '',
-    langTag ? `#${langTag}Movies` : '',
+    langTag ? `#${langTag}` : '',
     typeTag,
     genreTags,
-    '#HDUpdate #MovieDatabase'
+    '#HDMovies #WatchOnline'
   ]
     .filter(Boolean)
     .join(' ');
 };
 
+// EXACT ENGLISH POST FORMAT AS REQUESTED
 export const formatCaption = (media: any, settings: any): string => {
   const title = escapeHtml(media.title || 'Untitled');
   const year = media.releaseDate ? escapeHtml(String(media.releaseDate).substring(0, 4)) : 'N/A';
-  const langCode = (media.originalLanguage || '').toLowerCase();
+  const langCode = String(media.originalLanguage || '').toLowerCase();
   const langDisplay =
     LANGUAGE_NAMES[langCode] ||
     (Array.isArray(media.spokenLanguages) && media.spokenLanguages.length > 0
       ? media.spokenLanguages.join(', ')
-      : media.originalLanguage?.toUpperCase() || 'Multi-Audio');
+      : String(media.originalLanguage || 'English').toUpperCase());
 
   const genres =
     Array.isArray(media.genres) && media.genres.length > 0
       ? escapeHtml(media.genres.join(', '))
-      : 'Drama / Entertainment';
+      : 'Drama, Action';
 
   const tmdbRating =
     media.tmdbRating && Number(media.tmdbRating) > 0
-      ? `${Number(media.tmdbRating).toFixed(1)}/10 ⭐`
-      : 'New Release 🔥';
+      ? `${Number(media.tmdbRating).toFixed(1)}/10`
+      : 'New Release';
 
   const rawOverview = media.overview ? String(media.overview).trim() : '';
-  const defaultDesc = `${media.title} (${year}) is an exciting ${genres.toLowerCase()} ${
-    media.mediaType === 'tv' ? 'series' : 'movie'
-  } available in ${langDisplay}.`;
-  const descSource = rawOverview || defaultDesc;
+  const fallbackDesc = `Watch ${media.title} (${year}), an engaging ${genres.toLowerCase()} ${
+    media.mediaType === 'tv' ? 'web series' : 'movie'
+  } in ${langDisplay} with high-definition quality.`;
+  const descSource = rawOverview.length > 15 ? rawOverview : fallbackDesc;
   const shortOverview =
     descSource.length > 260
       ? `${escapeHtml(descSource.substring(0, 257))}...`
@@ -121,14 +133,20 @@ export const formatCaption = (media: any, settings: any): string => {
   const channel02Url = settings?.channel02Url || 'https://t.me/yourchannel2';
   const premiumUrl = settings?.premiumUrl || channel01Url;
   const adultUrl = settings?.adultContentUrl || channel02Url;
-  const ourRating = (settings?.ourRating || '4.6/5').trim();
+  const ourRating = String(settings?.ourRating || '4.7/5').trim();
 
   const lines: string[] = [`🔥 <b>${title}</b> (${year})`];
 
-  if (media.imdbId) {
+  if (media.imdbRating) {
+    lines.push(`⭐ <b>IMDb:</b> ${escapeHtml(String(media.imdbRating))}`);
+  } else if (media.imdbId) {
     lines.push(
-      `⭐ <b>IMDb:</b> <a href="https://www.imdb.com/title/${escapeHtml(media.imdbId)}/">Verified IMDb Page</a>`
+      `⭐ <b>IMDb:</b> <a href="https://www.imdb.com/title/${escapeHtml(media.imdbId)}/">Verified on IMDb</a>`
     );
+  }
+
+  if (media.rtRating) {
+    lines.push(`🍅 <b>RT Audience:</b> ${escapeHtml(String(media.rtRating))}`);
   }
 
   lines.push(
@@ -137,8 +155,8 @@ export const formatCaption = (media: any, settings: any): string => {
   );
 
   if (media.mediaType === 'tv' && media.seasonCount && Number(media.seasonCount) > 0) {
-    const epText = media.episodeCount ? ` (${media.episodeCount} Episodes)` : '';
-    lines.push(`📺 <b>Seasons:</b> ${escapeHtml(String(media.seasonCount))}${escapeHtml(epText)}`);
+    const epInfo = media.episodeCount ? ` (${media.episodeCount} Episodes)` : '';
+    lines.push(`📺 <b>Seasons:</b> ${escapeHtml(String(media.seasonCount))}${escapeHtml(epInfo)}`);
   }
 
   if (media.runtime && Number(media.runtime) > 0) {
@@ -153,7 +171,7 @@ export const formatCaption = (media: any, settings: any): string => {
 
   lines.push(
     '',
-    `📝 ${shortOverview}`,
+    shortOverview,
     '━━━━━━━━━━━━━━',
     `🔗 <b>JOIN CHANNEL 01:</b> 👉 <a href="${escapeHtml(channel01Url)}">JOIN NOW</a>`,
     `🔗 <b>JOIN CHANNEL 02:</b> 👉 <a href="${escapeHtml(channel02Url)}">JOIN NOW</a>`,
@@ -162,7 +180,7 @@ export const formatCaption = (media: any, settings: any): string => {
     `🔞 <a href="${escapeHtml(adultUrl)}"><b>18+ CONTENT ONLY</b></a>`,
     '⚠️ Adults only where applicable. Viewer discretion advised.',
     '',
-    `🏷️ ${escapeHtml(createSeoHashtags(media, langDisplay))}`
+    escapeHtml(createSeoHashtags(media, langDisplay))
   );
 
   return lines.join('\n');
@@ -195,8 +213,60 @@ export const sendToLogChannel = async (message: string): Promise<void> => {
   }
 };
 
+// Direct Error Alert to Admin DM with Fix Suggestion
+export const notifyAdminError = async (source: string, error: any, fixHint: string = '') => {
+  const errMsg = escapeHtml(error?.response?.data?.description || error?.message || String(error));
+  const hint = fixHint || 'Auto-recovery is active. Use /admin to retry or inspect settings.';
+  const alertHtml =
+    `🚨 <b>SYSTEM ERROR ALERT [${escapeHtml(source)}]</b>\n\n` +
+    `❌ <b>Error:</b> <code>${errMsg}</code>\n` +
+    `🛠️ <b>How to Solve:</b> ${escapeHtml(hint)}`;
+
+  const admins = getAdminIds();
+  for (const adminId of admins) {
+    try {
+      await bot.telegram.sendMessage(adminId, alertHtml, {
+        parse_mode: 'HTML',
+        ...Markup.inlineKeyboard([
+          [
+            Markup.button.callback('⚡ Retry Worker Now', 'admin_run_now'),
+            Markup.button.callback('⚙️ Open Admin Panel', 'admin_home')
+          ]
+        ])
+      });
+    } catch (_e) {
+      // Ignore if admin hasn't started private chat yet
+    }
+  }
+};
+
+// Middleware: Save User & Check Ban Status
+bot.use(async (ctx, next) => {
+  if (ctx.from && ctx.chat?.type === 'private') {
+    try {
+      const user: any = await BotUser.findOneAndUpdate(
+        { telegramId: ctx.from.id },
+        {
+          $set: {
+            firstName: ctx.from.first_name || '',
+            username: ctx.from.username || ''
+          }
+        },
+        { upsert: true, new: true }
+      );
+
+      if (user?.isBanned && !isAdmin(ctx.from.id)) {
+        return ctx.reply('🚫 You are banned from using this bot.');
+      }
+    } catch (_e) {
+      // Continue even if user tracking fails
+    }
+  }
+  return next();
+});
+
 export const sendMediaCardToChat = async (ctx: any, item: any) => {
-  let settings = await AppSettings.findOne({ key: 'global' });
+  let settings: any = await AppSettings.findOne({ key: 'global' });
   if (!settings) settings = await AppSettings.create({ key: 'global' });
 
   const caption = formatCaption(item, settings);
@@ -215,133 +285,336 @@ export const sendMediaCardToChat = async (ctx: any, item: any) => {
   return ctx.replyWithHTML(caption, keyboard);
 };
 
+// Render Master Admin Panel in Bot
+const renderAdminPanel = async (ctx: any, edit: boolean = false) => {
+  let settings: any = await AppSettings.findOne({ key: 'global' });
+  if (!settings) settings = await AppSettings.create({ key: 'global' });
+
+  const total = await MediaItem.countDocuments();
+  const published = await MediaItem.countDocuments({ isPublished: true });
+  const pending = await MediaItem.countDocuments({ isPublished: false });
+  const totalUsers = await BotUser.countDocuments();
+  const bannedUsers = await BotUser.countDocuments({ isBanned: true });
+  const activeJob: any = await MonthJob.findOne({ status: { $ne: 'COMPLETED' } }).sort({ month: -1 });
+  const interval = settings.publishIntervalMinutes || 20;
+
+  const text =
+    `👑 <b>MASTER ADMIN CONTROL PANEL</b>\n` +
+    `━━━━━━━━━━━━━━━━━━━━\n` +
+    `🌱 <b>Auto Seeding:</b> ${settings.autoSeedingEnabled ? '🟢 RUNNING' : '🔴 PAUSED'}\n` +
+    `📤 <b>Auto Publishing:</b> ${settings.autoPublishEnabled ? '🟢 RUNNING' : '🔴 PAUSED'}\n` +
+    `🤖 <b>AI Fallback (GPT/DeepSeek):</b> ${settings.aiEnabled !== false ? '🟢 ACTIVE' : '🔴 OFF'}\n` +
+    `⏱️ <b>Auto-Post Interval:</b> Every <code>${interval} mins</code>\n` +
+    `📅 <b>Active Month:</b> <code>${
+      activeJob ? `${activeJob.month} (${activeJob.mediaType.toUpperCase()} P${activeJob.currentPage}/${activeJob.totalPages})` : 'Idle'
+    }</code>\n` +
+    `🌐 <b>Languages:</b> <code>${escapeHtml(settings.allowedLanguages || 'hi,en,ta,te,ml,kn')}</code>\n` +
+    `⭐ <b>Our Rating:</b> <code>${escapeHtml(settings.ourRating || '4.7/5')}</code>\n` +
+    `━━━━━━━━━━━━━━━━━━━━\n` +
+    `🎬 <b>Database:</b> ${total} Titles | ✅ <b>Posted:</b> ${published} | ⏳ <b>Queue:</b> ${pending}\n` +
+    `👥 <b>Bot Users:</b> ${totalUsers} | 🚫 <b>Banned:</b> ${bannedUsers}\n` +
+    `━━━━━━━━━━━━━━━━━━━━\n` +
+    `<i>Select an action below to configure your bot:</i>`;
+
+  const keyboard = Markup.inlineKeyboard([
+    [
+      Markup.button.callback(
+        settings.autoPublishEnabled ? '⏸️ Stop Auto-Post' : '▶️ Start Auto-Post',
+        'admin_toggle_pub'
+      ),
+      Markup.button.callback(
+        settings.autoSeedingEnabled ? '⏸️ Stop Seeding' : '▶️ Start Seeding',
+        'admin_toggle_seed'
+      )
+    ],
+    [
+      Markup.button.callback('⚡ Post 1 Movie Now', 'admin_run_now'),
+      Markup.button.callback(`⏱️ Set Post Time (${interval}m)`, 'admin_menu_time')
+    ],
+    [
+      Markup.button.callback('🔗 Set Channel Links', 'admin_menu_links'),
+      Markup.button.callback('⭐ Set Our Rating', 'admin_prompt_rating')
+    ],
+    [
+      Markup.button.callback('📢 Broadcast Msg', 'admin_prompt_broadcast'),
+      Markup.button.callback('📌 Broadcast & Pin', 'admin_prompt_broadcast_pin')
+    ],
+    [
+      Markup.button.callback('🚫 Ban User', 'admin_prompt_ban'),
+      Markup.button.callback('✅ Unban User', 'admin_prompt_unban')
+    ],
+    [
+      Markup.button.callback(
+        settings.aiEnabled !== false ? '🤖 Disable AI' : '🤖 Enable AI',
+        'admin_toggle_ai'
+      ),
+      Markup.button.callback('🧹 Clean Invalid Queue', 'admin_clean_queue')
+    ],
+    [
+      Markup.button.callback('🔄 Refresh Panel', 'admin_home'),
+      Markup.button.callback('🛑 Emergency Stop All', 'admin_stop_all')
+    ]
+  ]);
+
+  if (edit && ctx.callbackQuery) {
+    try {
+      return await ctx.editMessageText(text, { parse_mode: 'HTML', ...keyboard });
+    } catch (_e) {
+      return ctx.replyWithHTML(text, keyboard);
+    }
+  }
+  return ctx.replyWithHTML(text, keyboard);
+};
+
+// Commands
 bot.start((ctx) => {
   ctx.replyWithHTML(
-    '🎬 <b>Welcome to the Movie & Web-Series Archive Bot!</b>\n\n' +
-      '🔎 किसी भी मूवी या वेब-सीरीज़ का नाम सीधे लिखकर भेजें (जैसे: <code>Kingsman</code> या <code>Pushpa</code>)।\n' +
-      '🆕 नवीनतम टाइटल्स के लिए <code>/latest</code> भेजें।\n' +
-      '⚙️ एडमिन कंट्रोल्स के लिए <code>/admin</code> भेजें।'
+    '🎬 <b>Welcome to the Automated Movie & Web-Series Bot!</b>\n\n' +
+      '🔎 Send any movie or web-series title directly (e.g., <code>Kingsman</code>, <code>Inception</code>) or use <code>/search TITLE</code>.\n' +
+      '🆕 Use <code>/latest</code> to browse recently added titles.\n' +
+      '👑 Admins can use <code>/admin</code> to open the Master Control Panel.'
   );
 });
 
 bot.help((ctx) => {
   ctx.replyWithHTML(
-    '📌 <b>Available Commands:</b>\n\n' +
-      '• किसी भी मूवी/सीरीज़ का नाम सीधे लिखकर भेजें\n' +
-      '• <code>/search &lt;title&gt;</code> - मूवी या वेब-सीरीज़ खोजें\n' +
-      '• <code>/latest</code> - हाल ही में जोड़े गए 10 टाइटल्स\n' +
-      '• <code>/status</code> - डेटाबेस और ऑटोमेशन स्टेटस\n' +
-      '• <code>/admin</code> - एडमिन कंट्रोल पैनल'
+    '📌 <b>Bot Commands (English):</b>\n\n' +
+      '• Send any Movie/Series name to search directly\n' +
+      '• <code>/search &lt;title&gt;</code> - Search movie or series\n' +
+      '• <code>/latest</code> - View 10 latest releases\n' +
+      '• <code>/status</code> - View live database & queue status\n' +
+      '• <code>/admin</code> - Open Master Admin Panel (Admin only)\n' +
+      '• <code>/ban &lt;user_id&gt;</code> - Ban a user (Admin only)\n' +
+      '• <code>/unban &lt;user_id&gt;</code> - Unban a user (Admin only)'
   );
 });
 
 bot.command('admin', async (ctx) => {
   if (!isAdmin(ctx.from?.id)) {
     return ctx.reply(
-      `⛔ यह पैनल केवल एडमिन के लिए है। (आपकी Telegram ID: ${ctx.from?.id})। इसे Render के ADMIN_ID में जोड़ें।`
+      `⛔ Access Denied. Your Telegram ID is ${ctx.from?.id}. Add it to ADMIN_ID in Render Environment Variables.`
     );
   }
-
-  let settings = await AppSettings.findOne({ key: 'global' });
-  if (!settings) settings = await AppSettings.create({ key: 'global' });
-
-  const total = await MediaItem.countDocuments();
-  const published = await MediaItem.countDocuments({ isPublished: true });
-  const pending = await MediaItem.countDocuments({ isPublished: false });
-  const appUrl = process.env.APP_BASE_URL || 'https://movies-search-bot-vdp1.onrender.com';
-
-  return ctx.replyWithHTML(
-    `⚙️ <b>ADMIN CONTROL PANEL</b>\n\n` +
-      `🌱 <b>Auto Seeding:</b> ${settings.autoSeedingEnabled ? '✅ RUNNING' : '⏸️ PAUSED'}\n` +
-      `📤 <b>Auto Publishing:</b> ${settings.autoPublishEnabled ? '✅ RUNNING' : '⏸️ PAUSED'}\n` +
-      `🌐 <b>Allowed Languages:</b> <code>${settings.allowedLanguages}</code>\n` +
-      `⭐ <b>Our Rating:</b> <code>${settings.ourRating}</code>\n` +
-      `🎬 <b>Total DB:</b> ${total} | ✅ <b>Posted:</b> ${published} | ⏳ <b>Queue:</b> ${pending}\n\n` +
-      `🔗 <b>Web Dashboard:</b> <a href="${appUrl}">${appUrl}</a>\n` +
-      `💡 लिंक्स बदलने के लिए: <code>/setlinks URL1 URL2 PREMIUM ADULT</code>`,
-    Markup.inlineKeyboard([
-      [
-        Markup.button.callback(
-          settings.autoSeedingEnabled ? '⏸️ Stop Seeding' : '▶️ Start Seeding',
-          'admin_toggle_seed'
-        ),
-        Markup.button.callback(
-          settings.autoPublishEnabled ? '⏸️ Stop Publish' : '▶️ Start Publish',
-          'admin_toggle_pub'
-        )
-      ],
-      [
-        Markup.button.callback('🧹 Clean Non-Priority Queue', 'admin_clean_queue'),
-        Markup.button.callback('🛑 Emergency Stop All', 'admin_stop_all')
-      ]
-    ])
-  );
+  adminSession.delete(ctx.from.id);
+  return renderAdminPanel(ctx, false);
 });
 
-bot.command('setlinks', async (ctx) => {
-  if (!isAdmin(ctx.from?.id)) return ctx.reply('⛔ केवल एडमिन के लिए।');
-  const parts = ctx.message.text.split(/\s+/).slice(1);
-  if (parts.length < 2) {
-    return ctx.reply(
-      'उपयोग: /setlinks <Channel1_URL> <Channel2_URL> [Premium_URL] [Adult_URL]'
-    );
-  }
-  await AppSettings.updateOne(
-    { key: 'global' },
-    {
-      $set: {
-        channel01Url: parts[0],
-        channel02Url: parts[1],
-        premiumUrl: parts[2] || parts[0],
-        adultContentUrl: parts[3] || parts[1]
-      }
-    },
-    { upsert: true }
-  );
-  return ctx.reply('✅ सभी चैनल लिंक्स सफलतापूर्वक अपडेट हो गए हैं!');
+bot.command('cancel', async (ctx) => {
+  if (ctx.from) adminSession.delete(ctx.from.id);
+  return ctx.reply('✅ Current admin action cancelled. Send /admin to open the panel.');
+});
+
+bot.command('ban', async (ctx) => {
+  if (!isAdmin(ctx.from?.id)) return ctx.reply('⛔ Admin only.');
+  const targetId = Number(ctx.message.text.split(/\s+/)[1]);
+  if (!targetId) return ctx.reply('Usage: /ban <Telegram_User_ID>');
+  await BotUser.findOneAndUpdate({ telegramId: targetId }, { $set: { isBanned: true } }, { upsert: true });
+  return ctx.reply(`🚫 User ${targetId} has been BANNED.`);
+});
+
+bot.command('unban', async (ctx) => {
+  if (!isAdmin(ctx.from?.id)) return ctx.reply('⛔ Admin only.');
+  const targetId = Number(ctx.message.text.split(/\s+/)[1]);
+  if (!targetId) return ctx.reply('Usage: /unban <Telegram_User_ID>');
+  await BotUser.findOneAndUpdate({ telegramId: targetId }, { $set: { isBanned: false } }, { upsert: true });
+  return ctx.reply(`✅ User ${targetId} has been UNBANNED.`);
+});
+
+// Master Admin Callback Actions
+bot.action('admin_home', async (ctx) => {
+  if (!isAdmin(ctx.from?.id)) return ctx.answerCbQuery('Admins only');
+  adminSession.delete(ctx.from.id);
+  await ctx.answerCbQuery('Refreshed');
+  return renderAdminPanel(ctx, true);
 });
 
 bot.action('admin_toggle_seed', async (ctx) => {
   if (!isAdmin(ctx.from?.id)) return ctx.answerCbQuery('Admins only');
-  const settings = await AppSettings.findOne({ key: 'global' });
+  const settings: any = await AppSettings.findOne({ key: 'global' });
   const nextState = !(settings?.autoSeedingEnabled ?? true);
-  await AppSettings.updateOne(
-    { key: 'global' },
-    { $set: { autoSeedingEnabled: nextState } },
-    { upsert: true }
-  );
-  await ctx.answerCbQuery(`Auto Seeding: ${nextState ? 'ON' : 'OFF'}`);
-  return ctx.reply(`🌱 Auto Seeding अब ${nextState ? '✅ चालू' : '⏸️ बंद'} है।`);
+  await AppSettings.updateOne({ key: 'global' }, { $set: { autoSeedingEnabled: nextState } }, { upsert: true });
+  await ctx.answerCbQuery(`Auto Seeding: ${nextState ? 'RUNNING' : 'PAUSED'}`);
+  return renderAdminPanel(ctx, true);
 });
 
 bot.action('admin_toggle_pub', async (ctx) => {
   if (!isAdmin(ctx.from?.id)) return ctx.answerCbQuery('Admins only');
-  const settings = await AppSettings.findOne({ key: 'global' });
+  const settings: any = await AppSettings.findOne({ key: 'global' });
   const nextState = !(settings?.autoPublishEnabled ?? true);
-  await AppSettings.updateOne(
-    { key: 'global' },
-    { $set: { autoPublishEnabled: nextState } },
-    { upsert: true }
+  await AppSettings.updateOne({ key: 'global' }, { $set: { autoPublishEnabled: nextState } }, { upsert: true });
+  await ctx.answerCbQuery(`Auto Publishing: ${nextState ? 'RUNNING' : 'PAUSED'}`);
+  return renderAdminPanel(ctx, true);
+});
+
+bot.action('admin_toggle_ai', async (ctx) => {
+  if (!isAdmin(ctx.from?.id)) return ctx.answerCbQuery('Admins only');
+  const settings: any = await AppSettings.findOne({ key: 'global' });
+  const nextState = !(settings?.aiEnabled ?? true);
+  await AppSettings.updateOne({ key: 'global' }, { $set: { aiEnabled: nextState } }, { upsert: true });
+  await ctx.answerCbQuery(`AI Fallback: ${nextState ? 'ACTIVE' : 'OFF'}`);
+  return renderAdminPanel(ctx, true);
+});
+
+bot.action('admin_run_now', async (ctx) => {
+  if (!isAdmin(ctx.from?.id)) return ctx.answerCbQuery('Admins only');
+  await ctx.answerCbQuery('Running Seeder & Publisher now...');
+  if (triggerWorkerNow) {
+    triggerWorkerNow().catch((e) => console.error(e));
+  }
+  return ctx.reply('⚡ Triggered immediate Seeding & Publishing cycle! Check your channel in a few seconds.');
+});
+
+bot.action('admin_menu_time', async (ctx) => {
+  if (!isAdmin(ctx.from?.id)) return ctx.answerCbQuery('Admins only');
+  await ctx.answerCbQuery();
+  return ctx.editMessageText(
+    '⏱️ <b>SET AUTO-POSTING TIME INTERVAL</b>\n\nSelect how often the bot should automatically publish movies to your channel:',
+    {
+      parse_mode: 'HTML',
+      ...Markup.inlineKeyboard([
+        [
+          Markup.button.callback('Every 5 Mins', 'admin_set_time_5'),
+          Markup.button.callback('Every 10 Mins', 'admin_set_time_10'),
+          Markup.button.callback('Every 15 Mins', 'admin_set_time_15')
+        ],
+        [
+          Markup.button.callback('Every 20 Mins', 'admin_set_time_20'),
+          Markup.button.callback('Every 30 Mins', 'admin_set_time_30'),
+          Markup.button.callback('Every 60 Mins', 'admin_set_time_60')
+        ],
+        [Markup.button.callback('✏️ Type Custom Minutes', 'admin_prompt_time')],
+        [Markup.button.callback('⬅️ Back to Admin Panel', 'admin_home')]
+      ])
+    }
   );
-  await ctx.answerCbQuery(`Auto Publishing: ${nextState ? 'ON' : 'OFF'}`);
-  return ctx.reply(`📤 Auto Publishing अब ${nextState ? '✅ चालू' : '⏸️ बंद'} है।`);
+});
+
+bot.action(/^admin_set_time_(\d+)$/, async (ctx) => {
+  if (!isAdmin(ctx.from?.id)) return ctx.answerCbQuery('Admins only');
+  const mins = Math.max(1, Number(ctx.match[1]));
+  await AppSettings.updateOne({ key: 'global' }, { $set: { publishIntervalMinutes: mins } }, { upsert: true });
+  await ctx.answerCbQuery(`Interval set to ${mins} minutes!`);
+  return renderAdminPanel(ctx, true);
+});
+
+bot.action('admin_prompt_time', async (ctx) => {
+  if (!isAdmin(ctx.from?.id)) return ctx.answerCbQuery('Admins only');
+  adminSession.set(ctx.from.id, { step: 'SET_TIME' });
+  await ctx.answerCbQuery();
+  return ctx.reply('⏱️ Send the auto-posting interval in minutes (e.g. 12), or /cancel:');
+});
+
+bot.action('admin_menu_links', async (ctx) => {
+  if (!isAdmin(ctx.from?.id)) return ctx.answerCbQuery('Admins only');
+  const settings: any = await AppSettings.findOne({ key: 'global' });
+  await ctx.answerCbQuery();
+  return ctx.editMessageText(
+    `🔗 <b>CONFIGURE CHANNEL LINKS</b>\n\n` +
+      `1️⃣ <b>Channel 01:</b> ${escapeHtml(settings?.channel01Url || '')}\n` +
+      `2️⃣ <b>Channel 02:</b> ${escapeHtml(settings?.channel02Url || '')}\n` +
+      `💎 <b>Premium:</b> ${escapeHtml(settings?.premiumUrl || '')}\n` +
+      `🔞 <b>18+ Adult:</b> ${escapeHtml(settings?.adultContentUrl || '')}\n\n` +
+      `Click a button below to update that link:`,
+    {
+      parse_mode: 'HTML',
+      ...Markup.inlineKeyboard([
+        [
+          Markup.button.callback('✏️ Set Channel 01', 'admin_link_c1'),
+          Markup.button.callback('✏️ Set Channel 02', 'admin_link_c2')
+        ],
+        [
+          Markup.button.callback('💎 Set Premium URL', 'admin_link_prem'),
+          Markup.button.callback('🔞 Set 18+ URL', 'admin_link_adult')
+        ],
+        [Markup.button.callback('⬅️ Back to Admin Panel', 'admin_home')]
+      ])
+    }
+  );
+});
+
+bot.action('admin_link_c1', async (ctx) => {
+  if (!isAdmin(ctx.from?.id)) return ctx.answerCbQuery('Admins only');
+  adminSession.set(ctx.from.id, { step: 'LINK_C1' });
+  await ctx.answerCbQuery();
+  return ctx.reply('🔗 Send the new URL for CHANNEL 01 (e.g. https://t.me/mychannel), or /cancel:');
+});
+
+bot.action('admin_link_c2', async (ctx) => {
+  if (!isAdmin(ctx.from?.id)) return ctx.answerCbQuery('Admins only');
+  adminSession.set(ctx.from.id, { step: 'LINK_C2' });
+  await ctx.answerCbQuery();
+  return ctx.reply('🔗 Send the new URL for CHANNEL 02, or /cancel:');
+});
+
+bot.action('admin_link_prem', async (ctx) => {
+  if (!isAdmin(ctx.from?.id)) return ctx.answerCbQuery('Admins only');
+  adminSession.set(ctx.from.id, { step: 'LINK_PREM' });
+  await ctx.answerCbQuery();
+  return ctx.reply('💎 Send the new URL for PREMIUM CONTENT, or /cancel:');
+});
+
+bot.action('admin_link_adult', async (ctx) => {
+  if (!isAdmin(ctx.from?.id)) return ctx.answerCbQuery('Admins only');
+  adminSession.set(ctx.from.id, { step: 'LINK_ADULT' });
+  await ctx.answerCbQuery();
+  return ctx.reply('🔞 Send the new URL for 18+ CONTENT, or /cancel:');
+});
+
+bot.action('admin_prompt_rating', async (ctx) => {
+  if (!isAdmin(ctx.from?.id)) return ctx.answerCbQuery('Admins only');
+  adminSession.set(ctx.from.id, { step: 'SET_RATING' });
+  await ctx.answerCbQuery();
+  return ctx.reply('⭐ Send the new "Our Rating" value (e.g. 4.8/5), or /cancel:');
+});
+
+bot.action('admin_prompt_ban', async (ctx) => {
+  if (!isAdmin(ctx.from?.id)) return ctx.answerCbQuery('Admins only');
+  adminSession.set(ctx.from.id, { step: 'BAN_USER' });
+  await ctx.answerCbQuery();
+  return ctx.reply('🚫 Send the Telegram User ID to BAN, or /cancel:');
+});
+
+bot.action('admin_prompt_unban', async (ctx) => {
+  if (!isAdmin(ctx.from?.id)) return ctx.answerCbQuery('Admins only');
+  adminSession.set(ctx.from.id, { step: 'UNBAN_USER' });
+  await ctx.answerCbQuery();
+  return ctx.reply('✅ Send the Telegram User ID to UNBAN, or /cancel:');
+});
+
+bot.action('admin_prompt_broadcast', async (ctx) => {
+  if (!isAdmin(ctx.from?.id)) return ctx.answerCbQuery('Admins only');
+  adminSession.set(ctx.from.id, { step: 'BROADCAST' });
+  await ctx.answerCbQuery();
+  return ctx.reply(
+    '📢 Send or forward any message (Text, Photo, Video, Sticker) to BROADCAST to all users, or /cancel:'
+  );
+});
+
+bot.action('admin_prompt_broadcast_pin', async (ctx) => {
+  if (!isAdmin(ctx.from?.id)) return ctx.answerCbQuery('Admins only');
+  adminSession.set(ctx.from.id, { step: 'BROADCAST_PIN' });
+  await ctx.answerCbQuery();
+  return ctx.reply(
+    '📌 Send or forward any message to BROADCAST AND PIN in all user chats, or /cancel:'
+  );
 });
 
 bot.action('admin_clean_queue', async (ctx) => {
   if (!isAdmin(ctx.from?.id)) return ctx.answerCbQuery('Admins only');
-  const settings = await AppSettings.findOne({ key: 'global' });
-  const allowed = (settings?.allowedLanguages || 'hi,en,ta,te,ml,kn')
+  const settings: any = await AppSettings.findOne({ key: 'global' });
+  const allowed = String(settings?.allowedLanguages || 'hi,en,ta,te,ml,kn')
     .split(',')
-    .map((s) => s.trim().toLowerCase())
+    .map((s: string) => s.trim().toLowerCase())
     .filter(Boolean);
 
   const res = await MediaItem.deleteMany({
     isPublished: false,
-    originalLanguage: { $nin: allowed }
+    $or: [{ originalLanguage: {$nin: allowed } }, { posterPath: '' }]
   });
-  await ctx.answerCbQuery('Cleaned queue!');
+  await MonthJob.deleteMany({ status: { $ne: 'COMPLETED' } });
+  await ctx.answerCbQuery('Queue cleaned!');
   return ctx.reply(
-    `🧹 क्यू से ${res.deletedCount} गैर-जरूरी भाषा (SU/ID आदि) वाली मूवीज हटा दी गईं!`
+    `🧹 Removed ${res.deletedCount} non-priority/incomplete items from queue and reset active crawler filter.`
   );
 });
 
@@ -353,179 +626,21 @@ bot.action('admin_stop_all', async (ctx) => {
     { upsert: true }
   );
   await ctx.answerCbQuery('Emergency Stop Activated');
-  return ctx.reply('🛑 EMERGENCY STOP ALL: सभी ऑटोमेटेड जॉब्स रोक दिए गए हैं।');
+  return renderAdminPanel(ctx, true);
 });
 
 bot.command('status', async (ctx) => {
   const totalMovies = await MediaItem.countDocuments();
   const publishedCount = await MediaItem.countDocuments({ isPublished: true });
   const pendingCount = await MediaItem.countDocuments({ isPublished: false });
-  const activeJob = await MonthJob.findOne({ status: { $ne: 'COMPLETED' } }).sort({ month: -1 });
-  const settings = await AppSettings.findOne({ key: 'global' });
+  const activeJob: any = await MonthJob.findOne({ status: { $ne: 'COMPLETED' } }).sort({ month: -1 });
+  const settings: any = await AppSettings.findOne({ key: 'global' });
 
   return ctx.replyWithHTML(
     `📊 <b>Bot & Database Status:</b>\n\n` +
       `🌱 <b>Auto Seeding:</b> ${settings?.autoSeedingEnabled ? '✅ ON' : '⏸️ OFF'}\n` +
       `📤 <b>Auto Publishing:</b> ${settings?.autoPublishEnabled ? '✅ ON' : '⏸️ OFF'}\n` +
+      `⏱️ <b>Interval:</b> Every ${settings?.publishIntervalMinutes || 20} mins\n` +
       `📅 <b>Active Month:</b> ${
         activeJob
-          ? `${activeJob.month} [${activeJob.mediaType.toUpperCase()}] (Page ${activeJob.currentPage}/${activeJob.totalPages})`
-          : 'N/A'
-      }\n` +
-      `🎬 <b>Total Collected:</b> ${totalMovies}\n` +
-      `✅ <b>Published:</b> ${publishedCount}\n` +
-      `⏳ <b>Queued:</b> ${pendingCount}`
-  );
-});
-
-bot.command('latest', async (ctx) => {
-  try {
-    const items = await MediaItem.find().sort({ releaseDate: -1 }).limit(10);
-    if (items.length === 0) {
-      return ctx.reply('अभी डेटाबेस में कोई रिकॉर्ड उपलब्ध नहीं है।');
-    }
-
-    const buttons = items.map((item: any, idx: number) => {
-      const year = item.releaseDate ? String(item.releaseDate).substring(0, 4) : 'N/A';
-      return [
-        Markup.button.callback(
-          `${idx + 1}. 🎬 ${item.title} (${year})`,
-          `view_${item._id}`
-        )
-      ];
-    });
-
-    return ctx.replyWithHTML(
-      '🆕 <b>Latest Titles in Database:</b>\n<i>(पूरी डिटेल और पोस्टर देखने के लिए किसी भी नाम पर क्लिक करें)</i>',
-      Markup.inlineKeyboard(buttons)
-    );
-  } catch (error) {
-    return ctx.reply('डेटा लोड करने में समस्या आई।');
-  }
-});
-
-bot.action(/^view_(.+)$/, async (ctx) => {
-  const id = ctx.match[1];
-  try {
-    const item = await MediaItem.findById(id);
-    if (!item) return ctx.answerCbQuery('Item not found');
-    await ctx.answerCbQuery();
-    return sendMediaCardToChat(ctx, item);
-  } catch (e) {
-    return ctx.answerCbQuery('Error loading movie');
-  }
-});
-
-const cleanUserQuery = (raw: string): string => {
-  return raw
-    .replace(/^\d+\.\s*/, '') // remove leading "1. "
-    .replace(/🎬/g, '')
-    .replace(/\(\d{4}\)\s*$/, '') // remove trailing "(2026)"
-    .trim();
-};
-
-const handleTitleSearch = async (ctx: any, rawQuery: string) => {
-  const cleanQuery = cleanUserQuery(rawQuery);
-  if (!cleanQuery || cleanQuery.length < 2) {
-    return ctx.reply('कृपया मूवी या वेब-सीरीज़ का सही नाम लिखें। उदाहरण: Kingsman');
-  }
-
-  try {
-    const escapedQuery = cleanQuery.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-    let results = await MediaItem.find({
-      title: { $regex: escapedQuery,$options: 'i' }
-    })
-      .sort({ voteCount: -1, releaseDate: -1 })
-      .limit(8);
-
-    // Live TMDB Fallback if not in local DB yet!
-    if (results.length === 0) {
-      const liveHits = await searchTMDBMulti(cleanQuery);
-      for (const hit of liveHits.slice(0, 5)) {
-        const mediaType: 'movie' | 'tv' = hit.media_type === 'tv' ? 'tv' : 'movie';
-        const details = await fetchTMDBDetails(hit.id, mediaType);
-
-        const genres =
-          details?.genres?.map((g: any) => g.name) || mapGenreIds(hit.genre_ids || []);
-        const runtime =
-          details?.runtime ||
-          (Array.isArray(details?.episode_run_time) ? details.episode_run_time[0] : 0) ||
-          0;
-        const seasonCount = details?.number_of_seasons || 0;
-        const episodeCount = details?.number_of_episodes || 0;
-        const imdbId = details?.external_ids?.imdb_id || details?.imdb_id || '';
-        const spokenLanguages = Array.isArray(details?.spoken_languages)
-          ? details.spoken_languages.map((l: any) => l.english_name || l.name).filter(Boolean)
-          : [];
-
-        await MediaItem.updateOne(
-          { tmdbId: hit.id, mediaType },
-          {
-            $set: {
-              title: hit.title || hit.name || 'Untitled',
-              originalTitle: hit.original_title || hit.original_name || '',
-              originalLanguage: hit.original_language || '',
-              spokenLanguages,
-              genres,
-              overview: hit.overview || details?.overview || '',
-              posterPath: hit.poster_path || details?.poster_path || '',
-              releaseDate: hit.release_date || hit.first_air_date || '',
-              tmdbRating: hit.vote_average || 0,
-              voteCount: hit.vote_count || 0,
-              runtime,
-              seasonCount,
-              episodeCount,
-              imdbId
-            }
-          },
-          { upsert: true }
-        );
-      }
-
-      results = await MediaItem.find({
-        title: { $regex: escapedQuery,$options: 'i' }
-      })
-        .sort({ voteCount: -1, releaseDate: -1 })
-        .limit(8);
-    }
-
-    if (results.length === 0) {
-      return ctx.reply(`"${cleanQuery}" के लिए कोई मूवी या वेब-सीरीज़ नहीं मिली।`);
-    }
-
-    // If only 1 match or exact match, send the full rich poster card directly
-    if (results.length === 1) {
-      return sendMediaCardToChat(ctx, results[0]);
-    }
-
-    const buttons = results.map((item: any) => {
-      const year = item.releaseDate ? String(item.releaseDate).substring(0, 4) : 'N/A';
-      const rating = item.tmdbRating ? `⭐${Number(item.tmdbRating).toFixed(1)}` : '';
-      return [
-        Markup.button.callback(
-          `🎬 ${item.title} (${year}) ${rating}`,
-          `view_${item._id}`
-        )
-      ];
-    });
-
-    return ctx.replyWithHTML(
-      `🔎 <b>"${escapeHtml(cleanQuery)}" के लिए परिणाम:</b>\n<i>(पूरी डिटेल देखने के लिए नीचे क्लिक करें)</i>`,
-      Markup.inlineKeyboard(buttons)
-    );
-  } catch (error) {
-    console.error('Search error:', error);
-    return ctx.reply('खोजते समय त्रुटि हुई। कृपया पुनः प्रयास करें।');
-  }
-};
-
-bot.command('search', async (ctx) => {
-  const query = ctx.message.text.replace(/^\/search(@\w+)?/i, '').trim();
-  return handleTitleSearch(ctx, query);
-});
-
-bot.on('text', async (ctx) => {
-  const text = ctx.message.text.trim();
-  if (text.startsWith('/')) return;
-  return handleTitleSearch(ctx, text);
-});
+          ? `${activeJob.month} [${String(activeJob.mediaType).toUpperCase()}] (Page ${activeJob.currentPage}/${activeJob
