@@ -12,7 +12,6 @@ export const registerWorkerTrigger = (fn: () => Promise<void>) => {
   triggerWorkerNow = fn;
 };
 
-// Track interactive admin prompts (Set Links, Broadcast, Ban/Unban, Set Time)
 const adminSession = new Map<number, { step: string }>();
 
 export const getTargetChannel = (): string => {
@@ -20,13 +19,12 @@ export const getTargetChannel = (): string => {
 };
 
 export const getAdminIds = (): string[] => {
-  const adminEnv = (process.env.ADMIN_ID || process.env.ADMIN_TELEGRAM_IDS || '').trim();
-  return adminEnv.split(',').map((id: string) => id.trim()).filter(Boolean);
+  const raw = (process.env.ADMIN_ID || process.env.ADMIN_TELEGRAM_IDS || '').trim();
+  return raw.split(',').map((id: string) => id.trim()).filter(Boolean);
 };
 
 export const isAdmin = (userId?: number): boolean => {
-  if (!userId) return false;
-  return getAdminIds().includes(String(userId));
+  return Boolean(userId && getAdminIds().includes(String(userId)));
 };
 
 export const escapeHtml = (unsafe: string = ''): string => {
@@ -37,34 +35,11 @@ export const escapeHtml = (unsafe: string = ''): string => {
     .replace(/"/g, '&quot;');
 };
 
-const LANGUAGE_NAMES: Record<string, string> = {
-  hi: 'Hindi',
-  en: 'English',
-  ta: 'Tamil',
-  te: 'Telugu',
-  ml: 'Malayalam',
-  kn: 'Kannada',
-  bn: 'Bengali',
-  mr: 'Marathi',
-  pa: 'Punjabi',
-  gu: 'Gujarati',
-  ur: 'Urdu',
-  ko: 'Korean',
-  ja: 'Japanese',
-  zh: 'Chinese',
-  es: 'Spanish',
-  fr: 'French',
-  de: 'German',
-  it: 'Italian',
-  ru: 'Russian',
-  pt: 'Portuguese',
-  tr: 'Turkish',
-  th: 'Thai',
-  id: 'Indonesian',
-  su: 'Sundanese',
-  tl: 'Tagalog',
-  ar: 'Arabic',
-  fa: 'Persian'
+const LANG_MAP: Record<string, string> = {
+  hi: 'Hindi', en: 'English', ta: 'Tamil', te: 'Telugu', ml: 'Malayalam', kn: 'Kannada',
+  bn: 'Bengali', mr: 'Marathi', pa: 'Punjabi', gu: 'Gujarati', ur: 'Urdu', ko: 'Korean',
+  ja: 'Japanese', zh: 'Chinese', es: 'Spanish', fr: 'French', de: 'German', it: 'Italian',
+  ru: 'Russian', pt: 'Portuguese', tr: 'Turkish', th: 'Thai', id: 'Indonesian', su: 'Sundanese'
 };
 
 const createSeoHashtags = (media: any, langName: string): string => {
@@ -75,36 +50,21 @@ const createSeoHashtags = (media: any, langName: string): string => {
     .slice(0, 4)
     .map((w: string) => w.charAt(0).toUpperCase() + w.slice(1).toLowerCase())
     .join('');
-
   const year = media.releaseDate ? String(media.releaseDate).substring(0, 4) : '';
   const typeTag = media.mediaType === 'tv' ? '#WebSeries #TVSeries' : '#Movies #FullMovie';
   const langTag = langName.split(' ')[0].replace(/[^a-zA-Z]/g, '');
   const genreTags = Array.isArray(media.genres)
-    ? media.genres
-        .slice(0, 3)
-        .map((g: string) => `#${String(g).replace(/[^a-zA-Z0-9]/g, '')}`)
-        .join(' ')
+    ? media.genres.slice(0, 3).map((g: string) => `#${String(g).replace(/[^a-zA-Z0-9]/g, '')}`).join(' ')
     : '';
-
-  return [
-    cleanTitle ? `#${cleanTitle}` : '',
-    year ? `#Release${year}` : '',
-    langTag ? `#${langTag}` : '',
-    typeTag,
-    genreTags,
-    '#HDMovies #WatchOnline'
-  ]
-    .filter(Boolean)
-    .join(' ');
+  return [cleanTitle ? `#${cleanTitle}` : '', year ? `#Release${year}` : '', langTag ? `#${langTag}` : '', typeTag, genreTags, '#HDMovies'].filter(Boolean).join(' ');
 };
 
-// EXACT ENGLISH POST FORMAT AS REQUESTED
 export const formatCaption = (media: any, settings: any): string => {
   const title = escapeHtml(media.title || 'Untitled');
   const year = media.releaseDate ? escapeHtml(String(media.releaseDate).substring(0, 4)) : 'N/A';
   const langCode = String(media.originalLanguage || '').toLowerCase();
   const langDisplay =
-    LANGUAGE_NAMES[langCode] ||
+    LANG_MAP[langCode] ||
     (Array.isArray(media.spokenLanguages) && media.spokenLanguages.length > 0
       ? media.spokenLanguages.join(', ')
       : String(media.originalLanguage || 'English').toUpperCase());
@@ -122,49 +82,35 @@ export const formatCaption = (media: any, settings: any): string => {
   const rawOverview = media.overview ? String(media.overview).trim() : '';
   const fallbackDesc = `Watch ${media.title} (${year}), an engaging ${genres.toLowerCase()} ${
     media.mediaType === 'tv' ? 'web series' : 'movie'
-  } in ${langDisplay} with high-definition quality.`;
+  } in ${langDisplay} with HD quality.`;
   const descSource = rawOverview.length > 15 ? rawOverview : fallbackDesc;
   const shortOverview =
-    descSource.length > 260
-      ? `${escapeHtml(descSource.substring(0, 257))}...`
-      : escapeHtml(descSource);
+    descSource.length > 250 ? `${escapeHtml(descSource.substring(0, 247))}...` : escapeHtml(descSource);
 
-  const channel01Url = settings?.channel01Url || 'https://t.me/yourchannel1';
-  const channel02Url = settings?.channel02Url || 'https://t.me/yourchannel2';
-  const premiumUrl = settings?.premiumUrl || channel01Url;
-  const adultUrl = settings?.adultContentUrl || channel02Url;
+  const c1 = settings?.channel01Url || 'https://t.me/yourchannel1';
+  const c2 = settings?.channel02Url || 'https://t.me/yourchannel2';
+  const prem = settings?.premiumUrl || c1;
+  const adult = settings?.adultContentUrl || c2;
   const ourRating = String(settings?.ourRating || '4.7/5').trim();
 
   const lines: string[] = [`🔥 <b>${title}</b> (${year})`];
-
   if (media.imdbRating) {
     lines.push(`⭐ <b>IMDb:</b> ${escapeHtml(String(media.imdbRating))}`);
   } else if (media.imdbId) {
-    lines.push(
-      `⭐ <b>IMDb:</b> <a href="https://www.imdb.com/title/${escapeHtml(media.imdbId)}/">Verified on IMDb</a>`
-    );
+    lines.push(`⭐ <b>IMDb:</b> <a href="https://www.imdb.com/title/${escapeHtml(media.imdbId)}/">Verified on IMDb</a>`);
   }
-
   if (media.rtRating) {
     lines.push(`🍅 <b>RT Audience:</b> ${escapeHtml(String(media.rtRating))}`);
   }
-
-  lines.push(
-    `🌐 <b>Language:</b> ${escapeHtml(langDisplay)}`,
-    `🎭 <b>Genre:</b> ${genres}`
-  );
-
+  lines.push(`🌐 <b>Language:</b> ${escapeHtml(langDisplay)}`, `🎭 <b>Genre:</b> ${genres}`);
   if (media.mediaType === 'tv' && media.seasonCount && Number(media.seasonCount) > 0) {
-    const epInfo = media.episodeCount ? ` (${media.episodeCount} Episodes)` : '';
-    lines.push(`📺 <b>Seasons:</b> ${escapeHtml(String(media.seasonCount))}${escapeHtml(epInfo)}`);
+    const ep = media.episodeCount ? ` (${media.episodeCount} Episodes)` : '';
+    lines.push(`📺 <b>Seasons:</b> ${escapeHtml(String(media.seasonCount))}${escapeHtml(ep)}`);
   }
-
   if (media.runtime && Number(media.runtime) > 0) {
     lines.push(`⏱️ <b>Runtime:</b> ${escapeHtml(String(media.runtime))} min`);
   }
-
   lines.push(`⭐ <b>TMDB Rating:</b> ${escapeHtml(tmdbRating)}`);
-
   if (ourRating) {
     lines.push(`🔥 <b>Our Rating:</b> ${escapeHtml(ourRating)}`);
   }
@@ -173,16 +119,15 @@ export const formatCaption = (media: any, settings: any): string => {
     '',
     shortOverview,
     '━━━━━━━━━━━━━━',
-    `🔗 <b>JOIN CHANNEL 01:</b> 👉 <a href="${escapeHtml(channel01Url)}">JOIN NOW</a>`,
-    `🔗 <b>JOIN CHANNEL 02:</b> 👉 <a href="${escapeHtml(channel02Url)}">JOIN NOW</a>`,
-    `💎 <a href="${escapeHtml(premiumUrl)}"><b>JOIN PREMIUM CONTENT</b></a>`,
+    `🔗 <b>JOIN CHANNEL 01:</b> 👉 <a href="${escapeHtml(c1)}">JOIN NOW</a>`,
+    `🔗 <b>JOIN CHANNEL 02:</b> 👉 <a href="${escapeHtml(c2)}">JOIN NOW</a>`,
+    `💎 <a href="${escapeHtml(prem)}"><b>JOIN PREMIUM CONTENT</b></a>`,
     '━━━━━━━━━━━━━━',
-    `🔞 <a href="${escapeHtml(adultUrl)}"><b>18+ CONTENT ONLY</b></a>`,
+    `🔞 <a href="${escapeHtml(adult)}"><b>18+ CONTENT ONLY</b></a>`,
     '⚠️ Adults only where applicable. Viewer discretion advised.',
     '',
     escapeHtml(createSeoHashtags(media, langDisplay))
   );
-
   return lines.join('\n');
 };
 
@@ -191,145 +136,103 @@ export const buildPostKeyboard = (settings: any) => {
   const c2 = settings?.channel02Url || 'https://t.me/yourchannel2';
   const prem = settings?.premiumUrl || c1;
   const adult = settings?.adultContentUrl || c2;
-
   return Markup.inlineKeyboard([
-    [
-      Markup.button.url('🔗 JOIN CHANNEL 01', c1),
-      Markup.button.url('🔗 JOIN CHANNEL 02', c2)
-    ],
+    [Markup.button.url('🔗 JOIN CHANNEL 01', c1), Markup.button.url('🔗 JOIN CHANNEL 02', c2)],
     [Markup.button.url('💎 JOIN PREMIUM CONTENT', prem)],
     [Markup.button.url('🔞 18+ CONTENT ONLY', adult)]
   ]);
 };
 
 export const sendToLogChannel = async (message: string): Promise<void> => {
-  const targetChannel = getTargetChannel();
-  if (!targetChannel) return;
-
+  const target = getTargetChannel();
+  if (!target) return;
   try {
-    await bot.telegram.sendMessage(targetChannel, message, { parse_mode: 'HTML' });
-  } catch (error) {
-    console.error('Failed to send message to log channel:', error);
+    await bot.telegram.sendMessage(target, message, { parse_mode: 'HTML' });
+  } catch (e) {
+    console.error('Log channel error:', e);
   }
 };
 
-// Direct Error Alert to Admin DM with Fix Suggestion
-export const notifyAdminError = async (source: string, error: any, fixHint: string = '') => {
+export const notifyAdminError = async (source: string, error: any, fixHint = '') => {
   const errMsg = escapeHtml(error?.response?.data?.description || error?.message || String(error));
-  const hint = fixHint || 'Auto-recovery is active. Use /admin to retry or inspect settings.';
-  const alertHtml =
-    `🚨 <b>SYSTEM ERROR ALERT [${escapeHtml(source)}]</b>\n\n` +
+  const msg =
+    `🚨 <b>ERROR ALERT [${escapeHtml(source)}]</b>\n\n` +
     `❌ <b>Error:</b> <code>${errMsg}</code>\n` +
-    `🛠️ <b>How to Solve:</b> ${escapeHtml(hint)}`;
-
-  const admins = getAdminIds();
-  for (const adminId of admins) {
+    `🛠️ <b>Fix:</b> ${escapeHtml(fixHint || 'Check /admin settings.')}`;
+  for (const id of getAdminIds()) {
     try {
-      await bot.telegram.sendMessage(adminId, alertHtml, {
+      await bot.telegram.sendMessage(id, msg, {
         parse_mode: 'HTML',
         ...Markup.inlineKeyboard([
-          [
-            Markup.button.callback('⚡ Retry Worker Now', 'admin_run_now'),
-            Markup.button.callback('⚙️ Open Admin Panel', 'admin_home')
-          ]
+          [Markup.button.callback('⚡ Retry Now', 'admin_run_now'), Markup.button.callback('⚙️ Admin Panel', 'admin_home')]
         ])
       });
-    } catch (_e) {
-      // Ignore if admin hasn't started private chat yet
-    }
+    } catch (_e) {}
   }
 };
 
-// Middleware: Save User & Check Ban Status
 bot.use(async (ctx, next) => {
   if (ctx.from && ctx.chat?.type === 'private') {
     try {
-      const user: any = await BotUser.findOneAndUpdate(
+      const u: any = await BotUser.findOneAndUpdate(
         { telegramId: ctx.from.id },
-        {
-          $set: {
-            firstName: ctx.from.first_name || '',
-            username: ctx.from.username || ''
-          }
-        },
+        { $set: { firstName: ctx.from.first_name || '', username: ctx.from.username || '' } },
         { upsert: true, new: true }
       );
-
-      if (user?.isBanned && !isAdmin(ctx.from.id)) {
+      if (u?.isBanned && !isAdmin(ctx.from.id)) {
         return ctx.reply('🚫 You are banned from using this bot.');
       }
-    } catch (_e) {
-      // Continue even if user tracking fails
-    }
+    } catch (_e) {}
   }
   return next();
 });
 
 export const sendMediaCardToChat = async (ctx: any, item: any) => {
-  let settings: any = await AppSettings.findOne({ key: 'global' });
-  if (!settings) settings = await AppSettings.create({ key: 'global' });
-
-  const caption = formatCaption(item, settings);
-  const keyboard = buildPostKeyboard(settings);
-  const posterUrl = item.posterPath
-    ? `https://image.tmdb.org/t/p/w500${item.posterPath}`
-    : null;
-
-  if (posterUrl) {
-    return ctx.replyWithPhoto(posterUrl, {
-      caption,
-      parse_mode: 'HTML',
-      ...keyboard
-    });
+  let s: any = await AppSettings.findOne({ key: 'global' });
+  if (!s) s = await AppSettings.create({ key: 'global' });
+  const caption = formatCaption(item, s);
+  const keyboard = buildPostKeyboard(s);
+  const poster = item.posterPath ? `https://image.tmdb.org/t/p/w500${item.posterPath}` : null;
+  if (poster) {
+    return ctx.replyWithPhoto(poster, { caption, parse_mode: 'HTML', ...keyboard });
   }
   return ctx.replyWithHTML(caption, keyboard);
 };
 
-// Render Master Admin Panel in Bot
-const renderAdminPanel = async (ctx: any, edit: boolean = false) => {
-  let settings: any = await AppSettings.findOne({ key: 'global' });
-  if (!settings) settings = await AppSettings.create({ key: 'global' });
-
-  const total = await MediaItem.countDocuments();
-  const published = await MediaItem.countDocuments({ isPublished: true });
-  const pending = await MediaItem.countDocuments({ isPublished: false });
-  const totalUsers = await BotUser.countDocuments();
-  const bannedUsers = await BotUser.countDocuments({ isBanned: true });
-  const activeJob: any = await MonthJob.findOne({ status: { $ne: 'COMPLETED' } }).sort({ month: -1 });
-  const interval = settings.publishIntervalMinutes || 20;
+const renderAdminPanel = async (ctx: any, edit = false) => {
+  let s: any = await AppSettings.findOne({ key: 'global' });
+  if (!s) s = await AppSettings.create({ key: 'global' });
+  const [total, published, pending, totalUsers, bannedUsers, activeJob] = await Promise.all([
+    MediaItem.countDocuments(),
+    MediaItem.countDocuments({ isPublished: true }),
+    MediaItem.countDocuments({ isPublished: false }),
+    BotUser.countDocuments(),
+    BotUser.countDocuments({ isBanned: true }),
+    MonthJob.findOne({ status: { $ne: 'COMPLETED' } }).sort({ month: -1 })
+  ]);
+  const mins = s.publishIntervalMinutes || 20;
 
   const text =
     `👑 <b>MASTER ADMIN CONTROL PANEL</b>\n` +
     `━━━━━━━━━━━━━━━━━━━━\n` +
-    `🌱 <b>Auto Seeding:</b> ${settings.autoSeedingEnabled ? '🟢 RUNNING' : '🔴 PAUSED'}\n` +
-    `📤 <b>Auto Publishing:</b> ${settings.autoPublishEnabled ? '🟢 RUNNING' : '🔴 PAUSED'}\n` +
-    `🤖 <b>AI Fallback (GPT/DeepSeek):</b> ${settings.aiEnabled !== false ? '🟢 ACTIVE' : '🔴 OFF'}\n` +
-    `⏱️ <b>Auto-Post Interval:</b> Every <code>${interval} mins</code>\n` +
-    `📅 <b>Active Month:</b> <code>${
-      activeJob ? `${activeJob.month} (${activeJob.mediaType.toUpperCase()} P${activeJob.currentPage}/${activeJob.totalPages})` : 'Idle'
-    }</code>\n` +
-    `🌐 <b>Languages:</b> <code>${escapeHtml(settings.allowedLanguages || 'hi,en,ta,te,ml,kn')}</code>\n` +
-    `⭐ <b>Our Rating:</b> <code>${escapeHtml(settings.ourRating || '4.7/5')}</code>\n` +
+    `🌱 <b>Auto Seeding:</b> ${s.autoSeedingEnabled ? '🟢 RUNNING' : '🔴 PAUSED'}\n` +
+    `📤 <b>Auto Publishing:</b> ${s.autoPublishEnabled ? '🟢 RUNNING' : '🔴 PAUSED'}\n` +
+    `🤖 <b>AI Fallback (GPT/DeepSeek):</b> ${s.aiEnabled !== false ? '🟢 ACTIVE' : '🔴 OFF'}\n` +
+    `⏱️ <b>Auto-Post Interval:</b> Every <code>${mins} mins</code>\n` +
+    `📅 <b>Active Month:</b> <code>${activeJob ? `${activeJob.month} (${String(activeJob.mediaType).toUpperCase()} P${activeJob.currentPage}/${activeJob.totalPages})` : 'Idle'}</code>\n` +
+    `⭐ <b>Our Rating:</b> <code>${escapeHtml(s.ourRating || '4.7/5')}</code>\n` +
     `━━━━━━━━━━━━━━━━━━━━\n` +
-    `🎬 <b>Database:</b> ${total} Titles | ✅ <b>Posted:</b> ${published} | ⏳ <b>Queue:</b> ${pending}\n` +
-    `👥 <b>Bot Users:</b> ${totalUsers} | 🚫 <b>Banned:</b> ${bannedUsers}\n` +
-    `━━━━━━━━━━━━━━━━━━━━\n` +
-    `<i>Select an action below to configure your bot:</i>`;
+    `🎬 <b>DB:</b> ${total} | ✅ <b>Posted:</b> ${published} | ⏳ <b>Queue:</b> ${pending}\n` +
+    `👥 <b>Users:</b> ${totalUsers} | 🚫 <b>Banned:</b> ${bannedUsers}`;
 
-  const keyboard = Markup.inlineKeyboard([
+  const kb = Markup.inlineKeyboard([
     [
-      Markup.button.callback(
-        settings.autoPublishEnabled ? '⏸️ Stop Auto-Post' : '▶️ Start Auto-Post',
-        'admin_toggle_pub'
-      ),
-      Markup.button.callback(
-        settings.autoSeedingEnabled ? '⏸️ Stop Seeding' : '▶️ Start Seeding',
-        'admin_toggle_seed'
-      )
+      Markup.button.callback(s.autoPublishEnabled ? '⏸️ Stop Auto-Post' : '▶️ Start Auto-Post', 'admin_toggle_pub'),
+      Markup.button.callback(s.autoSeedingEnabled ? '⏸️ Stop Seeding' : '▶️ Start Seeding', 'admin_toggle_seed')
     ],
     [
       Markup.button.callback('⚡ Post 1 Movie Now', 'admin_run_now'),
-      Markup.button.callback(`⏱️ Set Post Time (${interval}m)`, 'admin_menu_time')
+      Markup.button.callback(`⏱️ Set Post Time (${mins}m)`, 'admin_menu_time')
     ],
     [
       Markup.button.callback('🔗 Set Channel Links', 'admin_menu_links'),
@@ -344,10 +247,7 @@ const renderAdminPanel = async (ctx: any, edit: boolean = false) => {
       Markup.button.callback('✅ Unban User', 'admin_prompt_unban')
     ],
     [
-      Markup.button.callback(
-        settings.aiEnabled !== false ? '🤖 Disable AI' : '🤖 Enable AI',
-        'admin_toggle_ai'
-      ),
+      Markup.button.callback(s.aiEnabled !== false ? '🤖 Disable AI' : '🤖 Enable AI', 'admin_toggle_ai'),
       Markup.button.callback('🧹 Clean Invalid Queue', 'admin_clean_queue')
     ],
     [
@@ -358,42 +258,37 @@ const renderAdminPanel = async (ctx: any, edit: boolean = false) => {
 
   if (edit && ctx.callbackQuery) {
     try {
-      return await ctx.editMessageText(text, { parse_mode: 'HTML', ...keyboard });
+      return await ctx.editMessageText(text, { parse_mode: 'HTML', ...kb });
     } catch (_e) {
-      return ctx.replyWithHTML(text, keyboard);
+      return ctx.replyWithHTML(text, kb);
     }
   }
-  return ctx.replyWithHTML(text, keyboard);
+  return ctx.replyWithHTML(text, kb);
 };
 
-// Commands
 bot.start((ctx) => {
   ctx.replyWithHTML(
-    '🎬 <b>Welcome to the Automated Movie & Web-Series Bot!</b>\n\n' +
-      '🔎 Send any movie or web-series title directly (e.g., <code>Kingsman</code>, <code>Inception</code>) or use <code>/search TITLE</code>.\n' +
-      '🆕 Use <code>/latest</code> to browse recently added titles.\n' +
-      '👑 Admins can use <code>/admin</code> to open the Master Control Panel.'
+    '🎬 <b>Welcome to the Movie & Web-Series Bot!</b>\n\n' +
+      '🔎 Send any movie or series name directly (e.g., <code>Kingsman</code>, <code>Inception</code>) or use <code>/search TITLE</code>.\n' +
+      '🆕 Use <code>/latest</code> for recent releases.\n' +
+      '👑 Admins: Send <code>/admin</code> for Master Control Panel.'
   );
 });
 
 bot.help((ctx) => {
   ctx.replyWithHTML(
-    '📌 <b>Bot Commands (English):</b>\n\n' +
-      '• Send any Movie/Series name to search directly\n' +
-      '• <code>/search &lt;title&gt;</code> - Search movie or series\n' +
-      '• <code>/latest</code> - View 10 latest releases\n' +
-      '• <code>/status</code> - View live database & queue status\n' +
-      '• <code>/admin</code> - Open Master Admin Panel (Admin only)\n' +
-      '• <code>/ban &lt;user_id&gt;</code> - Ban a user (Admin only)\n' +
-      '• <code>/unban &lt;user_id&gt;</code> - Unban a user (Admin only)'
+    '📌 <b>Available Commands:</b>\n' +
+      '• Send any title to search\n' +
+      '• <code>/search &lt;title&gt;</code> - Search by title\n' +
+      '• <code>/latest</code> - Latest 10 titles\n' +
+      '• <code>/status</code> - Bot & DB status\n' +
+      '• <code>/admin</code> - Master Admin Panel'
   );
 });
 
 bot.command('admin', async (ctx) => {
   if (!isAdmin(ctx.from?.id)) {
-    return ctx.reply(
-      `⛔ Access Denied. Your Telegram ID is ${ctx.from?.id}. Add it to ADMIN_ID in Render Environment Variables.`
-    );
+    return ctx.reply(`⛔ Access Denied. Your ID: ${ctx.from?.id}. Add it to ADMIN_ID in Render.`);
   }
   adminSession.delete(ctx.from.id);
   return renderAdminPanel(ctx, false);
@@ -401,26 +296,25 @@ bot.command('admin', async (ctx) => {
 
 bot.command('cancel', async (ctx) => {
   if (ctx.from) adminSession.delete(ctx.from.id);
-  return ctx.reply('✅ Current admin action cancelled. Send /admin to open the panel.');
+  return ctx.reply('✅ Action cancelled. Send /admin to open panel.');
 });
 
 bot.command('ban', async (ctx) => {
   if (!isAdmin(ctx.from?.id)) return ctx.reply('⛔ Admin only.');
-  const targetId = Number(ctx.message.text.split(/\s+/)[1]);
-  if (!targetId) return ctx.reply('Usage: /ban <Telegram_User_ID>');
-  await BotUser.findOneAndUpdate({ telegramId: targetId }, { $set: { isBanned: true } }, { upsert: true });
-  return ctx.reply(`🚫 User ${targetId} has been BANNED.`);
+  const id = Number(ctx.message.text.split(/\s+/)[1]);
+  if (!id) return ctx.reply('Usage: /ban <User_ID>');
+  await BotUser.findOneAndUpdate({ telegramId: id }, { $set: { isBanned: true } }, { upsert: true });
+  return ctx.reply(`🚫 User ${id} BANNED.`);
 });
 
 bot.command('unban', async (ctx) => {
   if (!isAdmin(ctx.from?.id)) return ctx.reply('⛔ Admin only.');
-  const targetId = Number(ctx.message.text.split(/\s+/)[1]);
-  if (!targetId) return ctx.reply('Usage: /unban <Telegram_User_ID>');
-  await BotUser.findOneAndUpdate({ telegramId: targetId }, { $set: { isBanned: false } }, { upsert: true });
-  return ctx.reply(`✅ User ${targetId} has been UNBANNED.`);
+  const id = Number(ctx.message.text.split(/\s+/)[1]);
+  if (!id) return ctx.reply('Usage: /unban <User_ID>');
+  await BotUser.findOneAndUpdate({ telegramId: id }, { $set: { isBanned: false } }, { upsert: true });
+  return ctx.reply(`✅ User ${id} UNBANNED.`);
 });
 
-// Master Admin Callback Actions
 bot.action('admin_home', async (ctx) => {
   if (!isAdmin(ctx.from?.id)) return ctx.answerCbQuery('Admins only');
   adminSession.delete(ctx.from.id);
@@ -430,70 +324,65 @@ bot.action('admin_home', async (ctx) => {
 
 bot.action('admin_toggle_seed', async (ctx) => {
   if (!isAdmin(ctx.from?.id)) return ctx.answerCbQuery('Admins only');
-  const settings: any = await AppSettings.findOne({ key: 'global' });
-  const nextState = !(settings?.autoSeedingEnabled ?? true);
-  await AppSettings.updateOne({ key: 'global' }, { $set: { autoSeedingEnabled: nextState } }, { upsert: true });
-  await ctx.answerCbQuery(`Auto Seeding: ${nextState ? 'RUNNING' : 'PAUSED'}`);
+  const s: any = await AppSettings.findOne({ key: 'global' });
+  const next = !(s?.autoSeedingEnabled ?? true);
+  await AppSettings.updateOne({ key: 'global' }, { $set: { autoSeedingEnabled: next } }, { upsert: true });
+  await ctx.answerCbQuery(`Seeding: ${next ? 'ON' : 'OFF'}`);
   return renderAdminPanel(ctx, true);
 });
 
 bot.action('admin_toggle_pub', async (ctx) => {
   if (!isAdmin(ctx.from?.id)) return ctx.answerCbQuery('Admins only');
-  const settings: any = await AppSettings.findOne({ key: 'global' });
-  const nextState = !(settings?.autoPublishEnabled ?? true);
-  await AppSettings.updateOne({ key: 'global' }, { $set: { autoPublishEnabled: nextState } }, { upsert: true });
-  await ctx.answerCbQuery(`Auto Publishing: ${nextState ? 'RUNNING' : 'PAUSED'}`);
+  const s: any = await AppSettings.findOne({ key: 'global' });
+  const next = !(s?.autoPublishEnabled ?? true);
+  await AppSettings.updateOne({ key: 'global' }, { $set: { autoPublishEnabled: next } }, { upsert: true });
+  await ctx.answerCbQuery(`Publishing: ${next ? 'ON' : 'OFF'}`);
   return renderAdminPanel(ctx, true);
 });
 
 bot.action('admin_toggle_ai', async (ctx) => {
   if (!isAdmin(ctx.from?.id)) return ctx.answerCbQuery('Admins only');
-  const settings: any = await AppSettings.findOne({ key: 'global' });
-  const nextState = !(settings?.aiEnabled ?? true);
-  await AppSettings.updateOne({ key: 'global' }, { $set: { aiEnabled: nextState } }, { upsert: true });
-  await ctx.answerCbQuery(`AI Fallback: ${nextState ? 'ACTIVE' : 'OFF'}`);
+  const s: any = await AppSettings.findOne({ key: 'global' });
+  const next = !(s?.aiEnabled ?? true);
+  await AppSettings.updateOne({ key: 'global' }, { $set: { aiEnabled: next } }, { upsert: true });
+  await ctx.answerCbQuery(`AI: ${next ? 'ON' : 'OFF'}`);
   return renderAdminPanel(ctx, true);
 });
 
 bot.action('admin_run_now', async (ctx) => {
   if (!isAdmin(ctx.from?.id)) return ctx.answerCbQuery('Admins only');
-  await ctx.answerCbQuery('Running Seeder & Publisher now...');
-  if (triggerWorkerNow) {
-    triggerWorkerNow().catch((e) => console.error(e));
-  }
-  return ctx.reply('⚡ Triggered immediate Seeding & Publishing cycle! Check your channel in a few seconds.');
+  await ctx.answerCbQuery('Running now...');
+  if (triggerWorkerNow) triggerWorkerNow().catch((e) => console.error(e));
+  return ctx.reply('⚡ Triggered immediate Seeding & Publishing cycle!');
 });
 
 bot.action('admin_menu_time', async (ctx) => {
   if (!isAdmin(ctx.from?.id)) return ctx.answerCbQuery('Admins only');
   await ctx.answerCbQuery();
-  return ctx.editMessageText(
-    '⏱️ <b>SET AUTO-POSTING TIME INTERVAL</b>\n\nSelect how often the bot should automatically publish movies to your channel:',
-    {
-      parse_mode: 'HTML',
-      ...Markup.inlineKeyboard([
-        [
-          Markup.button.callback('Every 5 Mins', 'admin_set_time_5'),
-          Markup.button.callback('Every 10 Mins', 'admin_set_time_10'),
-          Markup.button.callback('Every 15 Mins', 'admin_set_time_15')
-        ],
-        [
-          Markup.button.callback('Every 20 Mins', 'admin_set_time_20'),
-          Markup.button.callback('Every 30 Mins', 'admin_set_time_30'),
-          Markup.button.callback('Every 60 Mins', 'admin_set_time_60')
-        ],
-        [Markup.button.callback('✏️ Type Custom Minutes', 'admin_prompt_time')],
-        [Markup.button.callback('⬅️ Back to Admin Panel', 'admin_home')]
-      ])
-    }
-  );
+  return ctx.editMessageText('⏱️ <b>SELECT AUTO-POSTING TIME INTERVAL:</b>', {
+    parse_mode: 'HTML',
+    ...Markup.inlineKeyboard([
+      [
+        Markup.button.callback('5 Mins', 'admin_set_time_5'),
+        Markup.button.callback('10 Mins', 'admin_set_time_10'),
+        Markup.button.callback('15 Mins', 'admin_set_time_15')
+      ],
+      [
+        Markup.button.callback('20 Mins', 'admin_set_time_20'),
+        Markup.button.callback('30 Mins', 'admin_set_time_30'),
+        Markup.button.callback('60 Mins', 'admin_set_time_60')
+      ],
+      [Markup.button.callback('✏️ Custom Minutes', 'admin_prompt_time')],
+      [Markup.button.callback('⬅️ Back', 'admin_home')]
+    ])
+  });
 });
 
 bot.action(/^admin_set_time_(\d+)$/, async (ctx) => {
   if (!isAdmin(ctx.from?.id)) return ctx.answerCbQuery('Admins only');
   const mins = Math.max(1, Number(ctx.match[1]));
   await AppSettings.updateOne({ key: 'global' }, { $set: { publishIntervalMinutes: mins } }, { upsert: true });
-  await ctx.answerCbQuery(`Interval set to ${mins} minutes!`);
+  await ctx.answerCbQuery(`Set to ${mins} mins`);
   return renderAdminPanel(ctx, true);
 });
 
@@ -501,146 +390,219 @@ bot.action('admin_prompt_time', async (ctx) => {
   if (!isAdmin(ctx.from?.id)) return ctx.answerCbQuery('Admins only');
   adminSession.set(ctx.from.id, { step: 'SET_TIME' });
   await ctx.answerCbQuery();
-  return ctx.reply('⏱️ Send the auto-posting interval in minutes (e.g. 12), or /cancel:');
+  return ctx.reply('⏱️ Send custom interval in minutes (e.g. 12), or /cancel:');
 });
 
 bot.action('admin_menu_links', async (ctx) => {
   if (!isAdmin(ctx.from?.id)) return ctx.answerCbQuery('Admins only');
-  const settings: any = await AppSettings.findOne({ key: 'global' });
+  const s: any = await AppSettings.findOne({ key: 'global' });
   await ctx.answerCbQuery();
   return ctx.editMessageText(
-    `🔗 <b>CONFIGURE CHANNEL LINKS</b>\n\n` +
-      `1️⃣ <b>Channel 01:</b> ${escapeHtml(settings?.channel01Url || '')}\n` +
-      `2️⃣ <b>Channel 02:</b> ${escapeHtml(settings?.channel02Url || '')}\n` +
-      `💎 <b>Premium:</b> ${escapeHtml(settings?.premiumUrl || '')}\n` +
-      `🔞 <b>18+ Adult:</b> ${escapeHtml(settings?.adultContentUrl || '')}\n\n` +
-      `Click a button below to update that link:`,
+    `🔗 <b>CHANNEL LINKS</b>\n\n1️⃣ C1: ${escapeHtml(s?.channel01Url || '')}\n2️⃣ C2: ${escapeHtml(s?.channel02Url || '')}\n💎 Prem: ${escapeHtml(s?.premiumUrl || '')}\n🔞 18+: ${escapeHtml(s?.adultContentUrl || '')}`,
     {
       parse_mode: 'HTML',
       ...Markup.inlineKeyboard([
-        [
-          Markup.button.callback('✏️ Set Channel 01', 'admin_link_c1'),
-          Markup.button.callback('✏️ Set Channel 02', 'admin_link_c2')
-        ],
-        [
-          Markup.button.callback('💎 Set Premium URL', 'admin_link_prem'),
-          Markup.button.callback('🔞 Set 18+ URL', 'admin_link_adult')
-        ],
-        [Markup.button.callback('⬅️ Back to Admin Panel', 'admin_home')]
+        [Markup.button.callback('✏️ Channel 01', 'admin_link_c1'), Markup.button.callback('✏️ Channel 02', 'admin_link_c2')],
+        [Markup.button.callback('💎 Premium URL', 'admin_link_prem'), Markup.button.callback('🔞 18+ URL', 'admin_link_adult')],
+        [Markup.button.callback('⬅️ Back', 'admin_home')]
       ])
     }
   );
 });
 
-bot.action('admin_link_c1', async (ctx) => {
-  if (!isAdmin(ctx.from?.id)) return ctx.answerCbQuery('Admins only');
-  adminSession.set(ctx.from.id, { step: 'LINK_C1' });
-  await ctx.answerCbQuery();
-  return ctx.reply('🔗 Send the new URL for CHANNEL 01 (e.g. https://t.me/mychannel), or /cancel:');
-});
+const promptStep = (actionName: string, stepName: string, msg: string) => {
+  bot.action(actionName, async (ctx) => {
+    if (!isAdmin(ctx.from?.id)) return ctx.answerCbQuery('Admins only');
+    adminSession.set(ctx.from.id, { step: stepName });
+    await ctx.answerCbQuery();
+    return ctx.reply(msg);
+  });
+};
 
-bot.action('admin_link_c2', async (ctx) => {
-  if (!isAdmin(ctx.from?.id)) return ctx.answerCbQuery('Admins only');
-  adminSession.set(ctx.from.id, { step: 'LINK_C2' });
-  await ctx.answerCbQuery();
-  return ctx.reply('🔗 Send the new URL for CHANNEL 02, or /cancel:');
-});
-
-bot.action('admin_link_prem', async (ctx) => {
-  if (!isAdmin(ctx.from?.id)) return ctx.answerCbQuery('Admins only');
-  adminSession.set(ctx.from.id, { step: 'LINK_PREM' });
-  await ctx.answerCbQuery();
-  return ctx.reply('💎 Send the new URL for PREMIUM CONTENT, or /cancel:');
-});
-
-bot.action('admin_link_adult', async (ctx) => {
-  if (!isAdmin(ctx.from?.id)) return ctx.answerCbQuery('Admins only');
-  adminSession.set(ctx.from.id, { step: 'LINK_ADULT' });
-  await ctx.answerCbQuery();
-  return ctx.reply('🔞 Send the new URL for 18+ CONTENT, or /cancel:');
-});
-
-bot.action('admin_prompt_rating', async (ctx) => {
-  if (!isAdmin(ctx.from?.id)) return ctx.answerCbQuery('Admins only');
-  adminSession.set(ctx.from.id, { step: 'SET_RATING' });
-  await ctx.answerCbQuery();
-  return ctx.reply('⭐ Send the new "Our Rating" value (e.g. 4.8/5), or /cancel:');
-});
-
-bot.action('admin_prompt_ban', async (ctx) => {
-  if (!isAdmin(ctx.from?.id)) return ctx.answerCbQuery('Admins only');
-  adminSession.set(ctx.from.id, { step: 'BAN_USER' });
-  await ctx.answerCbQuery();
-  return ctx.reply('🚫 Send the Telegram User ID to BAN, or /cancel:');
-});
-
-bot.action('admin_prompt_unban', async (ctx) => {
-  if (!isAdmin(ctx.from?.id)) return ctx.answerCbQuery('Admins only');
-  adminSession.set(ctx.from.id, { step: 'UNBAN_USER' });
-  await ctx.answerCbQuery();
-  return ctx.reply('✅ Send the Telegram User ID to UNBAN, or /cancel:');
-});
-
-bot.action('admin_prompt_broadcast', async (ctx) => {
-  if (!isAdmin(ctx.from?.id)) return ctx.answerCbQuery('Admins only');
-  adminSession.set(ctx.from.id, { step: 'BROADCAST' });
-  await ctx.answerCbQuery();
-  return ctx.reply(
-    '📢 Send or forward any message (Text, Photo, Video, Sticker) to BROADCAST to all users, or /cancel:'
-  );
-});
-
-bot.action('admin_prompt_broadcast_pin', async (ctx) => {
-  if (!isAdmin(ctx.from?.id)) return ctx.answerCbQuery('Admins only');
-  adminSession.set(ctx.from.id, { step: 'BROADCAST_PIN' });
-  await ctx.answerCbQuery();
-  return ctx.reply(
-    '📌 Send or forward any message to BROADCAST AND PIN in all user chats, or /cancel:'
-  );
-});
+promptStep('admin_link_c1', 'LINK_C1', '🔗 Send new URL for CHANNEL 01, or /cancel:');
+promptStep('admin_link_c2', 'LINK_C2', '🔗 Send new URL for CHANNEL 02, or /cancel:');
+promptStep('admin_link_prem', 'LINK_PREM', '💎 Send new URL for PREMIUM CONTENT, or /cancel:');
+promptStep('admin_link_adult', 'LINK_ADULT', '🔞 Send new URL for 18+ CONTENT, or /cancel:');
+promptStep('admin_prompt_rating', 'SET_RATING', '⭐ Send new "Our Rating" (e.g. 4.8/5), or /cancel:');
+promptStep('admin_prompt_ban', 'BAN_USER', '🚫 Send User Telegram ID to BAN, or /cancel:');
+promptStep('admin_prompt_unban', 'UNBAN_USER', '✅ Send User Telegram ID to UNBAN, or /cancel:');
+promptStep('admin_prompt_broadcast', 'BROADCAST', '📢 Send/forward any message to BROADCAST to all users, or /cancel:');
+promptStep('admin_prompt_broadcast_pin', 'BROADCAST_PIN', '📌 Send/forward any message to BROADCAST & PIN for all users, or /cancel:');
 
 bot.action('admin_clean_queue', async (ctx) => {
   if (!isAdmin(ctx.from?.id)) return ctx.answerCbQuery('Admins only');
-  const settings: any = await AppSettings.findOne({ key: 'global' });
-  const allowed = String(settings?.allowedLanguages || 'hi,en,ta,te,ml,kn')
-    .split(',')
-    .map((s: string) => s.trim().toLowerCase())
-    .filter(Boolean);
-
-  const res = await MediaItem.deleteMany({
-    isPublished: false,
-    $or: [{ originalLanguage: {$nin: allowed } }, { posterPath: '' }]
-  });
+  const s: any = await AppSettings.findOne({ key: 'global' });
+  const allowed = String(s?.allowedLanguages || 'hi,en,ta,te,ml,kn').split(',').map((x: string) => x.trim().toLowerCase()).filter(Boolean);
+  const res = await MediaItem.deleteMany({ isPublished: false, $or: [{ originalLanguage: {$nin: allowed } }, { posterPath: '' }] });
   await MonthJob.deleteMany({ status: { $ne: 'COMPLETED' } });
-  await ctx.answerCbQuery('Queue cleaned!');
-  return ctx.reply(
-    `🧹 Removed ${res.deletedCount} non-priority/incomplete items from queue and reset active crawler filter.`
-  );
+  await ctx.answerCbQuery('Cleaned!');
+  return ctx.reply(`🧹 Removed ${res.deletedCount} invalid items from queue.`);
 });
 
 bot.action('admin_stop_all', async (ctx) => {
   if (!isAdmin(ctx.from?.id)) return ctx.answerCbQuery('Admins only');
-  await AppSettings.updateOne(
-    { key: 'global' },
-    { $set: { autoSeedingEnabled: false, autoPublishEnabled: false, aiEnabled: false } },
-    { upsert: true }
-  );
+  await AppSettings.updateOne({ key: 'global' }, { $set: { autoSeedingEnabled: false, autoPublishEnabled: false, aiEnabled: false } }, { upsert: true });
   await ctx.answerCbQuery('Emergency Stop Activated');
   return renderAdminPanel(ctx, true);
 });
 
 bot.command('status', async (ctx) => {
-  const totalMovies = await MediaItem.countDocuments();
-  const publishedCount = await MediaItem.countDocuments({ isPublished: true });
-  const pendingCount = await MediaItem.countDocuments({ isPublished: false });
-  const activeJob: any = await MonthJob.findOne({ status: { $ne: 'COMPLETED' } }).sort({ month: -1 });
-  const settings: any = await AppSettings.findOne({ key: 'global' });
-
+  const [total, pub, pend, job, s]: any = await Promise.all([
+    MediaItem.countDocuments(),
+    MediaItem.countDocuments({ isPublished: true }),
+    MediaItem.countDocuments({ isPublished: false }),
+    MonthJob.findOne({ status: { $ne: 'COMPLETED' } }).sort({ month: -1 }),
+    AppSettings.findOne({ key: 'global' })
+  ]);
   return ctx.replyWithHTML(
-    `📊 <b>Bot & Database Status:</b>\n\n` +
-      `🌱 <b>Auto Seeding:</b> ${settings?.autoSeedingEnabled ? '✅ ON' : '⏸️ OFF'}\n` +
-      `📤 <b>Auto Publishing:</b> ${settings?.autoPublishEnabled ? '✅ ON' : '⏸️ OFF'}\n` +
-      `⏱️ <b>Interval:</b> Every ${settings?.publishIntervalMinutes || 20} mins\n` +
-      `📅 <b>Active Month:</b> ${
-        activeJob
-          ? `${activeJob.month} [${String(activeJob.mediaType).toUpperCase()}] (Page ${activeJob.currentPage}/${activeJob
+    `📊 <b>Status:</b>\n🌱 Seeding: ${s?.autoSeedingEnabled ? 'ON' : 'OFF'}\n📤 Publish: ${s?.autoPublishEnabled ? 'ON' : 'OFF'} (Every ${s?.publishIntervalMinutes || 20}m)\n📅 Month: ${job ? `${job.month} P${job.currentPage}/${job.totalPages}` : 'Idle'}\n🎬 Total: ${total} | ✅ Posted: ${pub} | ⏳ Queue: ${pend}`
+  );
+});
+
+bot.command('latest', async (ctx) => {
+  const items = await MediaItem.find().sort({ releaseDate: -1 }).limit(10);
+  if (items.length === 0) return ctx.reply('No titles yet.');
+  const buttons = items.map((item: any, i: number) => [
+    Markup.button.callback(`${i + 1}. 🎬 ${item.title} (${item.releaseDate ? String(item.releaseDate).substring(0, 4) : 'N/A'})`, `view_${item._id}`)
+  ]);
+  return ctx.replyWithHTML('🆕 <b>Latest Titles:</b>', Markup.inlineKeyboard(buttons));
+});
+
+bot.action(/^view_(.+)$/, async (ctx) => {
+  try {
+    let item: any = await MediaItem.findById(ctx.match[1]);
+    if (!item) return ctx.answerCbQuery('Not found');
+    await ctx.answerCbQuery('Loading...');
+    if (!item.runtime || !item.overview || !Array.isArray(item.genres) || item.genres.length === 0) {
+      const d = await fetchTMDBDetails(item.tmdbId, item.mediaType);
+      if (d) {
+        item.genres = d.genres?.map((g: any) => g.name) || item.genres;
+        item.runtime = d.runtime || (d.episode_run_time ? d.episode_run_time[0] : 0) || 0;
+        item.seasonCount = d.number_of_seasons || 0;
+        item.episodeCount = d.number_of_episodes || 0;
+        item.imdbId = d.external_ids?.imdb_id || d.imdb_id || '';
+      }
+      item = await enrichWithAI(item);
+      await item.save();
+    }
+    return sendMediaCardToChat(ctx, item);
+  } catch (_e) {
+    return ctx.answerCbQuery('Error');
+  }
+});
+
+const handleTitleSearch = async (ctx: any, rawQuery: string) => {
+  const cleanQuery = rawQuery.replace(/^\d+\.\s*/, '').replace(/🎬/g, '').replace(/\(\d{4}\)\s*$/, '').trim();
+  if (!cleanQuery || cleanQuery.length < 2) return ctx.reply('Please enter a valid movie/series name.');
+
+  try {
+    const escaped = cleanQuery.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    let results = await MediaItem.find({ title: { $regex: escaped,$options: 'i' } }).sort({ voteCount: -1, releaseDate: -1 }).limit(8);
+
+    if (results.length === 0) {
+      const liveHits = await searchTMDBMulti(cleanQuery);
+      for (const hit of liveHits.slice(0, 5)) {
+        const mediaType: 'movie' | 'tv' = hit.media_type === 'tv' ? 'tv' : 'movie';
+        const d = await fetchTMDBDetails(hit.id, mediaType);
+        const doc: any = await MediaItem.findOneAndUpdate(
+          { tmdbId: hit.id, mediaType },
+          {
+            $set: {
+              title: hit.title || hit.name || 'Untitled',
+              originalLanguage: hit.original_language || '',
+              genres: d?.genres?.map((g: any) => g.name) || mapGenreIds(hit.genre_ids || []),
+              overview: hit.overview || d?.overview || '',
+              posterPath: hit.poster_path || d?.poster_path || '',
+              releaseDate: hit.release_date || hit.first_air_date || '',
+              tmdbRating: hit.vote_average || 0,
+              voteCount: hit.vote_count || 0,
+              runtime: d?.runtime || (d?.episode_run_time ? d.episode_run_time[0] : 0) || 0,
+              seasonCount: d?.number_of_seasons || 0,
+              episodeCount: d?.number_of_episodes || 0,
+              imdbId: d?.external_ids?.imdb_id || d?.imdb_id || ''
+            }
+          },
+          { upsert: true, new: true }
+        );
+        if (doc && (!doc.overview || !doc.runtime)) {
+          await enrichWithAI(doc);
+          await doc.save();
+        }
+      }
+      results = await MediaItem.find({ title: { $regex: escaped,$options: 'i' } }).sort({ voteCount: -1, releaseDate: -1 }).limit(8);
+    }
+
+    if (results.length === 0) return ctx.reply(`No results found for "${cleanQuery}".`);
+    if (results.length === 1) {
+      let item: any = results[0];
+      if (!item.runtime || !item.overview || !item.imdbRating) {
+        item = await enrichWithAI(item);
+        await item.save();
+      }
+      return sendMediaCardToChat(ctx, item);
+    }
+
+    const buttons = results.map((item: any) => [
+      Markup.button.callback(`🎬 ${item.title} (${item.releaseDate ? String(item.releaseDate).substring(0, 4) : 'N/A'})`, `view_${item._id}`)
+    ]);
+    return ctx.replyWithHTML(`🔎 <b>Results for "${escapeHtml(cleanQuery)}":</b>`, Markup.inlineKeyboard(buttons));
+  } catch (_e) {
+    return ctx.reply('Search error. Please try again.');
+  }
+};
+
+bot.command('search', async (ctx) => {
+  const q = ctx.message.text.replace(/^\/search(@\w+)?/i, '').trim();
+  return handleTitleSearch(ctx, q);
+});
+
+bot.on('message', async (ctx: any) => {
+  const uid = ctx.from?.id;
+  const sess = uid ? adminSession.get(uid) : undefined;
+
+  if (sess && isAdmin(uid)) {
+    const step = sess.step;
+    adminSession.delete(uid);
+
+    if (step === 'BROADCAST' || step === 'BROADCAST_PIN') {
+      const pin = step === 'BROADCAST_PIN';
+      const users = await BotUser.find({ isBanned: { $ne: true } });
+      let sent = 0, pinned = 0, failed = 0;
+      await ctx.reply(`⏳ Broadcasting to ${users.length} users...`);
+      for (const u of users) {
+        try {
+          const cp: any = await ctx.telegram.copyMessage(u.telegramId, ctx.chat.id, ctx.message.message_id);
+          sent++;
+          if (pin && cp?.message_id) {
+            try {
+              await ctx.telegram.pinChatMessage(u.telegramId, cp.message_id, { disable_notification: false });
+              pinned++;
+            } catch (_pe) {}
+          }
+        } catch (_e) {
+          failed++;
+        }
+      }
+      return ctx.replyWithHTML(`✅ <b>Broadcast Done!</b>\n📤 Sent: ${sent} | 📌 Pinned: ${pinned} | ❌ Failed: ${failed}`);
+    }
+
+    const t = (ctx.message?.text || '').trim();
+    if (!t) return ctx.reply('Cancelled. Send /admin.');
+    if (step === 'LINK_C1') await AppSettings.updateOne({ key: 'global' }, { $set: { channel01Url: t } }, { upsert: true });
+    else if (step === 'LINK_C2') await AppSettings.updateOne({ key: 'global' }, { $set: { channel02Url: t } }, { upsert: true });
+    else if (step === 'LINK_PREM') await AppSettings.updateOne({ key: 'global' }, { $set: { premiumUrl: t } }, { upsert: true });
+    else if (step === 'LINK_ADULT') await AppSettings.updateOne({ key: 'global' }, { $set: { adultContentUrl: t } }, { upsert: true });
+    else if (step === 'SET_RATING') await AppSettings.updateOne({ key: 'global' }, { $set: { ourRating: t } }, { upsert: true });
+    else if (step === 'SET_TIME') await AppSettings.updateOne({ key: 'global' }, { $set: { publishIntervalMinutes: Math.max(1, Number(t) || 20) } }, { upsert: true });
+    else if (step === 'BAN_USER' && Number(t)) await BotUser.findOneAndUpdate({ telegramId: Number(t) }, { $set: { isBanned: true } }, { upsert: true });
+    else if (step === 'UNBAN_USER' && Number(t)) await BotUser.findOneAndUpdate({ telegramId: Number(t) }, { $set: { isBanned: false } }, { upsert: true });
+
+    await ctx.reply('✅ Updated successfully!');
+    return renderAdminPanel(ctx, false);
+  }
+
+  const text = (ctx.message?.text || '').trim();
+  if (!text || text.startsWith('/')) return;
+  return handleTitleSearch(ctx, text);
+});
+// === END OF FILE ===
