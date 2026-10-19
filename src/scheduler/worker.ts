@@ -13,15 +13,16 @@ import { MediaItem, PostedHistory, MonthJob, AppSettings } from '../database/mod
 import {
   bot,
   formatCaption,
+  sendPhotoSmart,
   notifyAdminError,
   getTargetChannel,
   registerWorkerTrigger,
+  registerWorkerReset,
   escapeHtml
 } from '../bot/telegram';
 
 let isJobRunning = false;
 
-// Smart Auto-Pruning: Check if MongoDB storage > 90% (~460MB of 512MB free tier), delete 80% of oldest posted movies
 const checkAndPruneStorageIfNeeded = async () => {
   try {
     const adminDb = mongoose.connection.db?.admin();
@@ -29,17 +30,15 @@ const checkAndPruneStorageIfNeeded = async () => {
     const stats = await mongoose.connection.db.stats();
     const storageSizeMB = (stats.storageSize || 0) / (1024 * 1024);
 
-    // If storage exceeds 460 MB (~90% of 512 MB free tier limit)
     if (storageSizeMB >= 460) {
       console.log(`⚠️ MongoDB storage is at ${storageSizeMB.toFixed(2)} MB (>=90%). Pruning old posted movies...`);
-      
+
       const publishedItems = await MediaItem.find({ isPublished: true }).sort({ createdAt: 1 });
       const countToDelete = Math.floor(publishedItems.length * 0.8);
 
       if (countToDelete > 0) {
         const itemsToRemove = publishedItems.slice(0, countToDelete);
         for (const itm of itemsToRemove) {
-          // Ensure tmdbId is permanently recorded in PostedHistory before deleting main document
           await PostedHistory.updateOne(
             { tmdbId: itm.tmdbId, mediaType: itm.mediaType },
             { $set: { tmdbId: itm.tmdbId, mediaType: itm.mediaType } },
@@ -47,7 +46,7 @@ const checkAndPruneStorageIfNeeded = async () => {
           );
           await MediaItem.deleteOne({ _id: itm._id });
         }
-        console.log(`🧹 Successfully pruned ${countToDelete} old posted movies to free up database storage.`);
+        console.log(`🧹 Pruned ${countToDelete} old posted movies.`);
       }
     }
   } catch (err: any) {
@@ -103,7 +102,6 @@ export const runWorkerCycle = async (forceNow = false): Promise<void> => {
   isJobRunning = true;
 
   try {
-    // Check storage limits before running seeding/publishing
     await checkAndPruneStorageIfNeeded();
 
     let settings: any = await AppSettings.findOne({ key: 'global' });
@@ -158,8 +156,7 @@ export const runWorkerCycle = async (forceNow = false): Promise<void> => {
         if (data && Array.isArray(data.results)) {
           for (const item of data.results) {
             if (!item.poster_path) continue;
-            
-            // Skip if already in permanent PostedHistory
+
             const alreadyPosted = await PostedHistory.findOne({ tmdbId: item.id, mediaType });
             if (alreadyPosted) continue;
 
@@ -207,7 +204,7 @@ export const runWorkerCycle = async (forceNow = false): Promise<void> => {
       }
     }
 
-    // 2. AUTO PUBLISHING
+    // 2. AUTO PUBLISHING WITH 4-LAYER SMART PHOTO FALLBACK
     const targetChannel = getTargetChannel();
     if (settings.autoPublishEnabled && targetChannel) {
       let pendingItem: any = await MediaItem.findOne({
@@ -224,8 +221,10 @@ export const runWorkerCycle = async (forceNow = false): Promise<void> => {
       }
 
       if (pendingItem) {
-        // Double check against PostedHistory
-        const alreadyDone = await PostedHistory.findOne({ tmdbId: pendingItem.tmdbId, mediaType: pendingItem.mediaType });
+        const alreadyDone = await PostedHistory.findOne({
+          tmdbId: pendingItem.tmdbId,
+          mediaType: pendingItem.mediaType
+        });
         if (alreadyDone) {
           pendingItem.isPublished = true;
           await pendingItem.save();
@@ -234,20 +233,18 @@ export const runWorkerCycle = async (forceNow = false): Promise<void> => {
 
         pendingItem = await enrichMediaItemWithDetails(pendingItem, settings.aiEnabled !== false);
         const caption = formatCaption(pendingItem, settings);
-        const posterUrl = pendingItem.posterPath
-          ? `https://image.tmdb.org/t/p/w500${pendingItem.posterPath}`
-          : null;
 
         try {
-          const sentMsg: any = posterUrl
-            ? await bot.telegram.sendPhoto(targetChannel, posterUrl, { caption, parse_mode: 'HTML' })
-            : await bot.telegram.sendMessage(targetChannel, caption, { parse_mode: 'HTML' });
+          const sentMsg: any = await sendPhotoSmart(
+            targetChannel,
+            pendingItem.posterPath || '',
+            caption
+          );
 
           pendingItem.isPublished = true;
           pendingItem.telegramMessageId = sentMsg?.message_id || 0;
           await pendingItem.save();
 
-          // Save to permanent PostedHistory so duplicate posts are blocked forever
           await PostedHistory.updateOne(
             { tmdbId: pendingItem.tmdbId, mediaType: pendingItem.mediaType },
             { $set: { tmdbId: pendingItem.tmdbId, mediaType: pendingItem.mediaType } },
@@ -256,7 +253,7 @@ export const runWorkerCycle = async (forceNow = false): Promise<void> => {
 
           settings.lastPublishAt = new Date();
           await settings.save();
-          console.log(`Published & recorded in history: ${pendingItem.title}`);
+          console.log(`Published successfully: ${pendingItem.title}`);
 
           if (Array.isArray(pendingItem.requestedBy) && pendingItem.requestedBy.length > 0) {
             const c1 = settings.channel01Url || 'https://t.me/yourchannel1';
@@ -272,13 +269,17 @@ export const runWorkerCycle = async (forceNow = false): Promise<void> => {
           }
         } catch (postErr: any) {
           console.error('Post send error:', postErr?.message);
-          await notifyAdminError('Telegram Publisher', postErr, 'Ensure bot is Admin in LOG_CHANNEL.');
+          await notifyAdminError(
+            'Telegram Publisher',
+            postErr,
+            'Click "Restart Render Server" or "Unlock & Retry Now" below.'
+          );
         }
       }
     }
   } catch (error: any) {
     console.error('Worker Error:', error);
-    await notifyAdminError('Worker Cycle', error, 'Check TMDB_API_TOKEN or MONGODB_URI.');
+    await notifyAdminError('Worker Cycle', error, 'Click "Restart Render Server" below to reboot cleanly.');
   } finally {
     isJobRunning = false;
   }
@@ -286,6 +287,9 @@ export const runWorkerCycle = async (forceNow = false): Promise<void> => {
 
 export const startCronJobs = (): void => {
   registerWorkerTrigger(() => runWorkerCycle(true));
+  registerWorkerReset(() => {
+    isJobRunning = false;
+  });
   setTimeout(() => runWorkerCycle(true), 10000);
   cron.schedule('* * * * *', async () => {
     await runWorkerCycle(false);
