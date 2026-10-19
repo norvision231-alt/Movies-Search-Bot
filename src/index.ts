@@ -9,7 +9,7 @@ import {
   suggestCorrectTitleWithAI,
   enrichWithAI,
   LANG_NAME_MAP
-} from '../services/tmdb';
+} from './services/tmdb';
 
 const token = (process.env.BOT_TOKEN || process.env.TELEGRAM_BOT_TOKEN || '').trim();
 if (!token) throw new Error('BOT_TOKEN is missing');
@@ -790,7 +790,7 @@ const handleTitleSearch = async (ctx: any, rawQuery: string) => {
       if (results.length === 0) {
         usedFuzzyOrSpellingFix = true;
         const candidates = await MediaItem.find().sort({ updatedAt: -1 }).limit(400);
-        const scored = candidates
+      const scored = candidates
           .map((item: any) => ({
             item,
             score: Math.max(
@@ -798,14 +798,11 @@ const handleTitleSearch = async (ctx: any, rawQuery: string) => {
               suggestedTitle ? calcSimilarity(suggestedTitle, item.title || '') : 0
             )
           }))
-          .filter((entry) => entry.score >= 0.45)
-          .sort((a, b) => b.score - a.score)
+          .filter((entry: any) => entry.score >= 0.45)
+          .sort((a: any, b: any) => b.score - a.score)
           .slice(0, 6);
 
-        results = scored.map((s) => s.item);
-      }
-    }
-
+        results = scored.map((s: any) => s.item);
     if (results.length === 0) {
       return ctx.replyWithHTML(
         `❌ <b>No exact match found for "${escapeHtml(cleanQuery)}"</b>\n\n` +
