@@ -907,10 +907,51 @@ bot.on('message', async (ctx: any) => {
   if (!text || text.startsWith('/')) return;
   return handleTitleSearch(ctx, text);
 });
-// --- APPLICATION STARTUP LOGIC ---
+// --- APPLICATION STARTUP LOGIC (BULLETPROOF FOR RENDER) ---
+
+// 1. Global Error Handler: पुराने बटन क्लिक (query is too old) या नेटवर्क एरर से बॉट कभी क्रैश नहीं होगा
+bot.catch((err: any, ctx: any) => {
+  console.warn(`⚠️ Handled Telegram Error (${ctx?.updateType || 'update'}):`, err?.message || err);
+});
+
+process.on('unhandledRejection', (reason: any) => {
+  console.warn('⚠️ Unhandled Rejection ignored to keep bot alive:', reason?.message || reason);
+});
+
+process.on('uncaughtException', (err: any) => {
+  console.warn('⚠️ Uncaught Exception ignored to keep bot alive:', err?.message || err);
+});
+
+// 2. Smart Bot Launcher with 409 Conflict Auto-Retry
+const launchBotSafely = async (retryCount = 0): Promise<void> => {
+  try {
+    // dropPendingUpdates: true पुराने अटके हुए बटन क्लिक्स को छोड़ देगा
+    await bot.launch({ dropPendingUpdates: true });
+    console.log('✅ Telegram Bot Launched successfully.');
+  } catch (err: any) {
+    const msg = String(err?.message || err);
+    if (msg.includes('409') && retryCount < 10) {
+      console.warn(`⏳ Old Render instance still stopping (409 Conflict). Retrying in 5s... (Attempt ${retryCount + 1}/10)`);
+      setTimeout(() => launchBotSafely(retryCount + 1), 5000);
+    } else {
+      console.error('❌ Bot launch error:', msg);
+      setTimeout(() => launchBotSafely(retryCount + 1), 10000);
+    }
+  }
+};
+
 const startApp = async () => {
   try {
-    // 1. Connect to MongoDB
+    // A. सबसे पहले HTTP Server चालू करें ताकि Render तुरंत पुराने कंटेनर को बंद कर दे
+    const PORT = Number(process.env.PORT || 10000);
+    http.createServer((_req, res) => {
+      res.writeHead(200, { 'Content-Type': 'text/plain' });
+      res.end('Movie Bot is Alive and Running!');
+    }).listen(PORT, '0.0.0.0', () => {
+      console.log(`✅ Render Web Service listening on port ${PORT}`);
+    });
+
+    // B. MongoDB से कनेक्ट करें
     const mongoUri = (process.env.MONGODB_URI || '').trim();
     if (!mongoUri) {
       console.error('❌ MONGODB_URI is missing in Render Environment!');
@@ -919,33 +960,29 @@ const startApp = async () => {
       console.log('✅ Connected to MongoDB successfully.');
     }
 
-    // 2. Start Background Workers (Seeding & Publishing)
+    // C. Background Workers (Seeding & Publishing) चालू करें
     startCronJobs();
     console.log('✅ Background Workers (Cron) Started.');
 
-    // 3. Launch the Telegram Bot
-    bot.launch();
-    console.log('✅ Telegram Bot Launched successfully.');
-
-    // 4. Start a dummy HTTP Server to keep Render Web Service Alive
-    const PORT = process.env.PORT || 3000;
-    http.createServer((req, res) => {
-      res.writeHead(200, { 'Content-Type': 'text/plain' });
-      res.end('Movie Bot is Alive and Running!');
-    }).listen(PORT, () => {
-      console.log(`✅ Render Web Service listening on port ${PORT}`);
-    });
+    // D. 3 सेकंड रुककर Telegram Bot लॉन्च करें ताकि पुराना कंटेनर बंद हो चुका हो
+    setTimeout(() => {
+      launchBotSafely();
+    }, 3000);
 
   } catch (error) {
     console.error('❌ Startup Error:', error);
-    process.exit(1);
   }
 };
 
 // Start the application
 startApp();
 
-// Enable graceful stop
-process.once('SIGINT', () => bot.stop('SIGINT'));
-process.once('SIGTERM', () => bot.stop('SIGTERM'));
-// === END OF FILE ===
+// Enable graceful stop when Render replaces the container
+process.once('SIGINT', () => {
+  try { bot.stop('SIGINT'); } catch (_e) {}
+  process.exit(0);
+});
+process.once('SIGTERM', () => {
+  try { bot.stop('SIGTERM'); } catch (_e) {}
+  process.exit(0);
+});
