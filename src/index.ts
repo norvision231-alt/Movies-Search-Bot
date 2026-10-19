@@ -1,6 +1,6 @@
 import axios from 'axios';
 import { Telegraf, Markup } from 'telegraf';
-import { MediaItem, MonthJob, AppSettings, BotUser, PostedHistory } from '../database/models';
+import { MediaItem, MonthJob, AppSettings, BotUser, PostedHistory } from './database/models';
 import {
   searchTMDBMulti,
   fetchTMDBDetails,
@@ -790,7 +790,7 @@ const handleTitleSearch = async (ctx: any, rawQuery: string) => {
       if (results.length === 0) {
         usedFuzzyOrSpellingFix = true;
         const candidates = await MediaItem.find().sort({ updatedAt: -1 }).limit(400);
-      const scored = candidates
+        const scored = candidates
           .map((item: any) => ({
             item,
             score: Math.max(
@@ -803,6 +803,9 @@ const handleTitleSearch = async (ctx: any, rawQuery: string) => {
           .slice(0, 6);
 
         results = scored.map((s: any) => s.item);
+      }
+    }
+
     if (results.length === 0) {
       return ctx.replyWithHTML(
         `❌ <b>No exact match found for "${escapeHtml(cleanQuery)}"</b>\n\n` +
