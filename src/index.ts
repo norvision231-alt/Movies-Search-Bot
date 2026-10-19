@@ -1,4 +1,7 @@
 import axios from 'axios';
+import * as http from 'http';
+import mongoose from 'mongoose';
+import { startCronJobs } from './scheduler/worker';
 import { Telegraf, Markup } from 'telegraf';
 import { MediaItem, MonthJob, AppSettings, BotUser, PostedHistory } from './database/models';
 import {
@@ -904,4 +907,45 @@ bot.on('message', async (ctx: any) => {
   if (!text || text.startsWith('/')) return;
   return handleTitleSearch(ctx, text);
 });
+// --- APPLICATION STARTUP LOGIC ---
+const startApp = async () => {
+  try {
+    // 1. Connect to MongoDB
+    const mongoUri = (process.env.MONGODB_URI || '').trim();
+    if (!mongoUri) {
+      console.error('❌ MONGODB_URI is missing in Render Environment!');
+    } else {
+      await mongoose.connect(mongoUri);
+      console.log('✅ Connected to MongoDB successfully.');
+    }
+
+    // 2. Start Background Workers (Seeding & Publishing)
+    startCronJobs();
+    console.log('✅ Background Workers (Cron) Started.');
+
+    // 3. Launch the Telegram Bot
+    bot.launch();
+    console.log('✅ Telegram Bot Launched successfully.');
+
+    // 4. Start a dummy HTTP Server to keep Render Web Service Alive
+    const PORT = process.env.PORT || 3000;
+    http.createServer((req, res) => {
+      res.writeHead(200, { 'Content-Type': 'text/plain' });
+      res.end('Movie Bot is Alive and Running!');
+    }).listen(PORT, () => {
+      console.log(`✅ Render Web Service listening on port ${PORT}`);
+    });
+
+  } catch (error) {
+    console.error('❌ Startup Error:', error);
+    process.exit(1);
+  }
+};
+
+// Start the application
+startApp();
+
+// Enable graceful stop
+process.once('SIGINT', () => bot.stop('SIGINT'));
+process.once('SIGTERM', () => bot.stop('SIGTERM'));
 // === END OF FILE ===
