@@ -1,7 +1,7 @@
 import axios from 'axios';
 import * as http from 'http';
 import mongoose from 'mongoose';
-import { startCronJobs } from './scheduler/worker';
+import { startCronJobs, cleanupOldPostedMovies } from './scheduler/worker';
 import { Telegraf, Markup } from 'telegraf';
 import { MediaItem, MonthJob, AppSettings, BotUser, PostedHistory } from './database/models';
 import {
@@ -96,6 +96,7 @@ export const getDisplayLanguages = (media: any): string => {
 export const formatCaption = (media: any, settings: any, extraFooterHtml = ''): string => {
   const title = escapeHtml(media.title || 'Untitled');
   const year = media.releaseDate ? escapeHtml(String(media.releaseDate).substring(0, 4)) : 'N/A';
+  const fullReleaseDate = media.releaseDate ? escapeHtml(String(media.releaseDate).trim()) : 'N/A';
   const langDisplay = getDisplayLanguages(media);
 
   const genres =
@@ -147,6 +148,8 @@ export const formatCaption = (media: any, settings: any, extraFooterHtml = ''): 
   if (ourRating) {
     lines.push(`🔥 <b>Our Rating:</b> ${escapeHtml(ourRating)}`);
   }
+  // Our Rating के ठीक नीचे Release Date
+  lines.push(`📅 <b>Release Date:</b> ${fullReleaseDate}`);
 
   lines.push(
     '',
@@ -172,7 +175,7 @@ export const buildPostKeyboard = (_settings: any): Record<string, any> => {
   return {};
 };
 
-// 4-Layer Smart Photo Sender: Direct URL -> w500 Buffer -> w342 Buffer -> Text Fallback
+// 4-Layer Smart Photo Sender with FloodWait Retry
 export const sendPhotoSmart = async (
   chatId: string | number,
   posterPath: string,
@@ -187,7 +190,8 @@ export const sendPhotoSmart = async (
     // Layer 1: Direct URL send
     try {
       return await bot.telegram.sendPhoto(chatId, url500, { caption, parse_mode: 'HTML' });
-    } catch (_err1) {
+    } catch (err1: any) {
+      if (err1?.response?.parameters?.retry_after) throw err1;
       console.warn('Direct URL photo failed, downloading w500 buffer via Axios...');
     }
 
@@ -204,7 +208,8 @@ export const sendPhotoSmart = async (
         { source: imageBuffer, filename: 'poster.jpg' },
         { caption, parse_mode: 'HTML' }
       );
-    } catch (_err2) {
+    } catch (err2: any) {
+      if (err2?.response?.parameters?.retry_after) throw err2;
       console.warn('w500 buffer failed, trying lighter w342 buffer...');
     }
 
@@ -221,7 +226,8 @@ export const sendPhotoSmart = async (
         { source: smallBuffer, filename: 'poster.jpg' },
         { caption, parse_mode: 'HTML' }
       );
-    } catch (_err3) {
+    } catch (err3: any) {
+      if (err3?.response?.parameters?.retry_after) throw err3;
       console.warn('All poster download attempts failed, falling back to text post.');
     }
   }
@@ -266,7 +272,9 @@ export const notifyAdminError = async (source: string, error: any, fixHint = '')
 };
 
 const queueMovieForChannelAndGetTimer = async (item: any, userId?: number, settings?: any): Promise<string> => {
-  const alreadyPosted = item.isPublished || (await PostedHistory.findOne({ tmdbId: item.tmdbId, mediaType: item.mediaType }));
+  const alreadyPosted =
+    item.isPublished ||
+    (await PostedHistory.findOne({ tmdbId: item.tmdbId, mediaType: item.mediaType }).lean());
   if (alreadyPosted) {
     return `✅ <b>Channel Status:</b> Already Published on Channel!`;
   }
@@ -287,14 +295,14 @@ const queueMovieForChannelAndGetTimer = async (item: any, userId?: number, setti
   });
   const position = aheadCount + 1;
 
-  const intervalMins = Math.max(1, Number(settings?.publishIntervalMinutes || 20));
-  const intervalMs = intervalMins * 60 * 1000;
-  const lastPubMs = settings?.lastPublishAt ? new Date(settings.lastPublishAt).getTime() : 0;
-  const now = Date.now();
+  const intervalMins = Math.max(1, Number(settings?.publishIntervalMinutes || 1));
+  const postsPerBatch = Math.max(1, Number(settings?.postsPerBatch || 19));
+  const batchesAhead = Math.floor((position - 1) / postsPerBatch);
+  const slotInBatch = (position - 1) % postsPerBatch;
 
-  const nextSlotMs = lastPubMs > 0 ? Math.max(now + 45000, lastPubMs + intervalMs) : now + 60000;
-  const targetPostMs = nextSlotMs + (position - 1) * intervalMs;
-  const waitSec = Math.max(30, Math.floor((targetPostMs - now) / 1000));
+  const now = Date.now();
+  const targetPostMs = now + batchesAhead * intervalMins * 60000 + (slotInBatch + 1) * 3200;
+  const waitSec = Math.max(5, Math.floor((targetPostMs - now) / 1000));
   const waitMins = Math.floor(waitSec / 60);
   const remSec = waitSec % 60;
 
@@ -367,28 +375,28 @@ bot.use(async (ctx, next) => {
 const renderAdminPanel = async (ctx: any, edit = false) => {
   let s: any = await AppSettings.findOne({ key: 'global' });
   if (!s) s = await AppSettings.create({ key: 'global' });
-  const [total, published, pending, priorityQueue, totalUsers, bannedUsers, activeJob] = await Promise.all([
-    MediaItem.countDocuments(),
-    MediaItem.countDocuments({ isPublished: true }),
+  const [totalInQueue, postedHistoryCount, priorityQueue, totalUsers, bannedUsers, activeJob] = await Promise.all([
     MediaItem.countDocuments({ isPublished: false }),
+    PostedHistory.countDocuments(),
     MediaItem.countDocuments({ isPublished: false, userRequested: true }),
     BotUser.countDocuments(),
     BotUser.countDocuments({ isBanned: true }),
     MonthJob.findOne({ status: { $ne: 'COMPLETED' } }).sort({ month: -1 })
   ]);
-  const mins = s.publishIntervalMinutes || 20;
+  const mins = s.publishIntervalMinutes || 1;
+  const batch = s.postsPerBatch || 19;
 
   const text =
     `👑 <b>MASTER ADMIN CONTROL PANEL</b>\n` +
     `━━━━━━━━━━━━━━━━━━━━\n` +
     `🌱 <b>Auto Seeding:</b> ${s.autoSeedingEnabled ? '🟢 RUNNING' : '🔴 PAUSED'}\n` +
     `📤 <b>Auto Publishing:</b> ${s.autoPublishEnabled ? '🟢 RUNNING' : '🔴 PAUSED'}\n` +
+    `🚀 <b>Posting Speed:</b> <code>${batch} Movies / ${mins} Min</code>\n` +
     `🤖 <b>AI Fallback (GPT/DeepSeek):</b> ${s.aiEnabled !== false ? '🟢 ACTIVE' : '🔴 OFF'}\n` +
-    `⏱️ <b>Auto-Post Interval:</b> Every <code>${mins} mins</code>\n` +
     `📅 <b>Active Month:</b> <code>${activeJob ? `${activeJob.month} (${String(activeJob.mediaType).toUpperCase()} P${activeJob.currentPage}/${activeJob.totalPages})` : 'Idle'}</code>\n` +
     `⭐ <b>Our Rating:</b> <code>${escapeHtml(s.ourRating || '4.7/5')}</code>\n` +
     `━━━━━━━━━━━━━━━━━━━━\n` +
-    `🎬 <b>DB:</b> ${total} | ✅ <b>Posted:</b> ${published} | ⏳ <b>Queue:</b> ${pending}\n` +
+    `⏳ <b>Unposted Queue:</b> ${totalInQueue} | ✅ <b>Posted & Cleaned:</b> ${postedHistoryCount}\n` +
     `🔥 <b>User Priority Queue:</b> ${priorityQueue}\n` +
     `👥 <b>Users:</b> ${totalUsers} | 🚫 <b>Banned:</b> ${bannedUsers}`;
 
@@ -398,8 +406,12 @@ const renderAdminPanel = async (ctx: any, edit = false) => {
       Markup.button.callback(s.autoSeedingEnabled ? '⏸️ Stop Seeding' : '▶️ Start Seeding', 'admin_toggle_seed')
     ],
     [
-      Markup.button.callback('⚡ Post 1 Movie Now', 'admin_run_now'),
-      Markup.button.callback(`⏱️ Set Post Time (${mins}m)`, 'admin_menu_time')
+      Markup.button.callback('🚀 Turbo (19/Min)', 'admin_speed_turbo'),
+      Markup.button.callback(`⏱️ Speed (${batch}/${mins}m)`, 'admin_menu_time')
+    ],
+    [
+      Markup.button.callback('⚡ Run Batch Now', 'admin_run_now'),
+      Markup.button.callback('🧹 Delete Old Posted', 'admin_clean_posted')
     ],
     [
       Markup.button.callback('🔗 Set Channel Links', 'admin_menu_links'),
@@ -441,7 +453,7 @@ const executeRenderRestart = async (ctx: any) => {
 
   await ctx.replyWithHTML(
     '🔄 <b>Restarting Render Service & Clearing Locks...</b>\n' +
-      '✅ Auto-Seeding and Auto-Publishing will resume automatically in 10–15 seconds!'
+      '✅ Auto-Seeding and Auto-Publishing (19 posts/min) will resume automatically in 10–15 seconds!'
   );
 
   await AppSettings.updateOne(
@@ -529,6 +541,24 @@ bot.action('admin_restart_server', async (ctx) => {
   return executeRenderRestart(ctx);
 });
 
+bot.action('admin_speed_turbo', async (ctx) => {
+  if (!isAdmin(ctx.from?.id)) return ctx.answerCbQuery('Admins only');
+  await AppSettings.updateOne(
+    { key: 'global' },
+    { $set: { publishIntervalMinutes: 1, postsPerBatch: 19, autoPublishEnabled: true } },
+    { upsert: true }
+  );
+  await ctx.answerCbQuery('🚀 Turbo ON: 19 Posts / 1 Min!');
+  return renderAdminPanel(ctx, true);
+});
+
+bot.action('admin_clean_posted', async (ctx) => {
+  if (!isAdmin(ctx.from?.id)) return ctx.answerCbQuery('Admins only');
+  await cleanupOldPostedMovies();
+  await ctx.answerCbQuery('Cleaned old posted movies!');
+  return renderAdminPanel(ctx, true);
+});
+
 bot.action('admin_toggle_seed', async (ctx) => {
   if (!isAdmin(ctx.from?.id)) return ctx.answerCbQuery('Admins only');
   const s: any = await AppSettings.findOne({ key: 'global' });
@@ -560,26 +590,28 @@ bot.action('admin_run_now', async (ctx) => {
   if (!isAdmin(ctx.from?.id)) return ctx.answerCbQuery('Admins only');
   if (resetWorkerLockFn) resetWorkerLockFn();
   await AppSettings.updateOne({ key: 'global' }, { $set: { autoPublishEnabled: true } }, { upsert: true });
-  await ctx.answerCbQuery('Unlocked & Running now...');
+  await ctx.answerCbQuery('Unlocked & Running batch now...');
   if (triggerWorkerNow) triggerWorkerNow().catch((e) => console.error(e));
-  return ctx.reply('⚡ Worker unlocked and triggered immediate Seeding & Publishing cycle!');
+  return ctx.reply('⚡ Worker unlocked and triggered immediate 19-Movie Publishing batch!');
 });
 
 bot.action('admin_menu_time', async (ctx) => {
   if (!isAdmin(ctx.from?.id)) return ctx.answerCbQuery('Admins only');
   await ctx.answerCbQuery();
-  return ctx.editMessageText('⏱️ <b>SELECT AUTO-POSTING TIME INTERVAL:</b>', {
+  return ctx.editMessageText('⏱️ <b>SELECT AUTO-POSTING SPEED & INTERVAL:</b>', {
     parse_mode: 'HTML',
     ...Markup.inlineKeyboard([
       [
-        Markup.button.callback('5 Mins', 'admin_set_time_5'),
-        Markup.button.callback('10 Mins', 'admin_set_time_10'),
-        Markup.button.callback('15 Mins', 'admin_set_time_15')
+        Markup.button.callback('🚀 19 Posts / 1 Min', 'admin_speed_turbo'),
+        Markup.button.callback('⚡ 10 Posts / 1 Min', 'admin_set_batch_10')
       ],
       [
-        Markup.button.callback('20 Mins', 'admin_set_time_20'),
-        Markup.button.callback('30 Mins', 'admin_set_time_30'),
-        Markup.button.callback('60 Mins', 'admin_set_time_60')
+        Markup.button.callback('1 Post / 1 Min', 'admin_set_time_1'),
+        Markup.button.callback('1 Post / 5 Mins', 'admin_set_time_5')
+      ],
+      [
+        Markup.button.callback('1 Post / 15 Mins', 'admin_set_time_15'),
+        Markup.button.callback('1 Post / 20 Mins', 'admin_set_time_20')
       ],
       [Markup.button.callback('✏️ Custom Minutes', 'admin_prompt_time')],
       [Markup.button.callback('⬅️ Back', 'admin_home')]
@@ -587,11 +619,26 @@ bot.action('admin_menu_time', async (ctx) => {
   });
 });
 
+bot.action('admin_set_batch_10', async (ctx) => {
+  if (!isAdmin(ctx.from?.id)) return ctx.answerCbQuery('Admins only');
+  await AppSettings.updateOne(
+    { key: 'global' },
+    { $set: { publishIntervalMinutes: 1, postsPerBatch: 10, autoPublishEnabled: true } },
+    { upsert: true }
+  );
+  await ctx.answerCbQuery('Set to 10 Posts / 1 Min');
+  return renderAdminPanel(ctx, true);
+});
+
 bot.action(/^admin_set_time_(\d+)$/, async (ctx) => {
   if (!isAdmin(ctx.from?.id)) return ctx.answerCbQuery('Admins only');
   const mins = Math.max(1, Number(ctx.match[1]));
-  await AppSettings.updateOne({ key: 'global' }, { $set: { publishIntervalMinutes: mins } }, { upsert: true });
-  await ctx.answerCbQuery(`Set to ${mins} mins`);
+  await AppSettings.updateOne(
+    { key: 'global' },
+    { $set: { publishIntervalMinutes: mins, postsPerBatch: 1 } },
+    { upsert: true }
+  );
+  await ctx.answerCbQuery(`Set to 1 Post every ${mins} mins`);
   return renderAdminPanel(ctx, true);
 });
 
@@ -599,7 +646,7 @@ bot.action('admin_prompt_time', async (ctx) => {
   if (!isAdmin(ctx.from?.id)) return ctx.answerCbQuery('Admins only');
   adminSession.set(ctx.from.id, { step: 'SET_TIME' });
   await ctx.answerCbQuery();
-  return ctx.reply('⏱️ Send custom interval in minutes (e.g. 12), or /cancel:');
+  return ctx.reply('⏱️ Send custom interval in minutes (e.g. 5), or /cancel:');
 });
 
 bot.action('admin_menu_links', async (ctx) => {
@@ -642,7 +689,7 @@ bot.action('admin_clean_queue', async (ctx) => {
   if (!isAdmin(ctx.from?.id)) return ctx.answerCbQuery('Admins only');
   const s: any = await AppSettings.findOne({ key: 'global' });
   const allowed = String(s?.allowedLanguages || 'hi,en,ta,te,ml,kn').split(',').map((x: string) => x.trim().toLowerCase()).filter(Boolean);
-  const res = await MediaItem.deleteMany({ isPublished: false, $or: [{ originalLanguage: {$nin: allowed } }, { posterPath: '' }] });
+  const res = await MediaItem.deleteMany({ isPublished: false, $or: [{ originalLanguage: { $nin: allowed } }, { posterPath: '' }] });
   await MonthJob.deleteMany({ status: { $ne: 'COMPLETED' } });
   await ctx.answerCbQuery('Cleaned!');
   return ctx.reply(`🧹 Removed ${res.deletedCount} invalid items from queue.`);
@@ -656,16 +703,15 @@ bot.action('admin_stop_all', async (ctx) => {
 });
 
 bot.command('status', async (ctx) => {
-  const [total, pub, pend, prio, job, s]: any = await Promise.all([
-    MediaItem.countDocuments(),
-    MediaItem.countDocuments({ isPublished: true }),
+  const [pend, postedHistoryCount, prio, job, s]: any = await Promise.all([
     MediaItem.countDocuments({ isPublished: false }),
+    PostedHistory.countDocuments(),
     MediaItem.countDocuments({ isPublished: false, userRequested: true }),
     MonthJob.findOne({ status: { $ne: 'COMPLETED' } }).sort({ month: -1 }),
     AppSettings.findOne({ key: 'global' })
   ]);
   return ctx.replyWithHTML(
-    `📊 <b>Status:</b>\n🌱 Seeding: ${s?.autoSeedingEnabled ? 'ON' : 'OFF'}\n📤 Publish: ${s?.autoPublishEnabled ? 'ON' : 'OFF'} (Every ${s?.publishIntervalMinutes || 20}m)\n📅 Month: ${job ? `${job.month} P${job.currentPage}/${job.totalPages}` : 'Idle'}\n🎬 Total: ${total} | ✅ Posted: ${pub} | ⏳ Queue: ${pend} (🔥 Priority: ${prio})`
+    `📊 <b>Status:</b>\n🌱 Seeding: ${s?.autoSeedingEnabled ? 'ON' : 'OFF'}\n📤 Publish: ${s?.autoPublishEnabled ? 'ON' : 'OFF'} (${s?.postsPerBatch || 19} Posts / ${s?.publishIntervalMinutes || 1}m)\n📅 Month: ${job ? `${job.month} P${job.currentPage}/${job.totalPages}` : 'Idle'}\n✅ Posted & Cleaned: ${postedHistoryCount} | ⏳ Queue: ${pend} (🔥 Priority: ${prio})`
   );
 });
 
@@ -698,7 +744,7 @@ const enrichItemFull = async (item: any): Promise<any> => {
 bot.action(/^view_(.+)$/, async (ctx) => {
   try {
     let item: any = await MediaItem.findById(ctx.match[1]);
-    if (!item) return ctx.answerCbQuery('Not found');
+    if (!item) return ctx.answerCbQuery('Not found or already published');
     await ctx.answerCbQuery('Loading details & queue timer...');
     item = await enrichItemFull(item);
     return sendMediaCardToChat(ctx, item);
@@ -710,7 +756,7 @@ bot.action(/^view_(.+)$/, async (ctx) => {
 const saveTMDBHitsToDB = async (hits: any[]) => {
   for (const hit of hits.slice(0, 5)) {
     const mediaType: 'movie' | 'tv' = hit.media_type === 'tv' ? 'tv' : 'movie';
-    const alreadyDone = await PostedHistory.findOne({ tmdbId: hit.id, mediaType });
+    const alreadyDone = await PostedHistory.findOne({ tmdbId: hit.id, mediaType }).lean();
     if (alreadyDone) continue;
 
     const d = await fetchTMDBDetails(hit.id, mediaType);
@@ -756,7 +802,7 @@ const handleTitleSearch = async (ctx: any, rawQuery: string) => {
 
   try {
     const escaped = cleanQuery.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-    let results = await MediaItem.find({ title: { $regex: escaped,$options: 'i' } })
+    let results = await MediaItem.find({ title: { $regex: escaped, $options: 'i' } })
       .sort({ voteCount: -1, releaseDate: -1 })
       .limit(8);
 
@@ -786,7 +832,7 @@ const handleTitleSearch = async (ctx: any, rawQuery: string) => {
         await saveTMDBHitsToDB(liveHits);
       }
 
-      results = await MediaItem.find({ title: { $regex: escaped,$options: 'i' } })
+      results = await MediaItem.find({ title: { $regex: escaped, $options: 'i' } })
         .sort({ voteCount: -1, releaseDate: -1 })
         .limit(8);
 
@@ -895,7 +941,7 @@ bot.on('message', async (ctx: any) => {
     else if (step === 'LINK_PREM') await AppSettings.updateOne({ key: 'global' }, { $set: { premiumUrl: t } }, { upsert: true });
     else if (step === 'LINK_ADULT') await AppSettings.updateOne({ key: 'global' }, { $set: { adultContentUrl: t } }, { upsert: true });
     else if (step === 'SET_RATING') await AppSettings.updateOne({ key: 'global' }, { $set: { ourRating: t } }, { upsert: true });
-    else if (step === 'SET_TIME') await AppSettings.updateOne({ key: 'global' }, { $set: { publishIntervalMinutes: Math.max(1, Number(t) || 20) } }, { upsert: true });
+    else if (step === 'SET_TIME') await AppSettings.updateOne({ key: 'global' }, { $set: { publishIntervalMinutes: Math.max(1, Number(t) || 1) } }, { upsert: true });
     else if (step === 'BAN_USER' && Number(t)) await BotUser.findOneAndUpdate({ telegramId: Number(t) }, { $set: { isBanned: true } }, { upsert: true });
     else if (step === 'UNBAN_USER' && Number(t)) await BotUser.findOneAndUpdate({ telegramId: Number(t) }, { $set: { isBanned: false } }, { upsert: true });
 
@@ -907,9 +953,9 @@ bot.on('message', async (ctx: any) => {
   if (!text || text.startsWith('/')) return;
   return handleTitleSearch(ctx, text);
 });
+
 // --- APPLICATION STARTUP LOGIC (BULLETPROOF FOR RENDER) ---
 
-// 1. Global Error Handler: पुराने बटन क्लिक (query is too old) या नेटवर्क एरर से बॉट कभी क्रैश नहीं होगा
 bot.catch((err: any, ctx: any) => {
   console.warn(`⚠️ Handled Telegram Error (${ctx?.updateType || 'update'}):`, err?.message || err);
 });
@@ -922,10 +968,8 @@ process.on('uncaughtException', (err: any) => {
   console.warn('⚠️ Uncaught Exception ignored to keep bot alive:', err?.message || err);
 });
 
-// 2. Smart Bot Launcher with 409 Conflict Auto-Retry
 const launchBotSafely = async (retryCount = 0): Promise<void> => {
   try {
-    // dropPendingUpdates: true पुराने अटके हुए बटन क्लिक्स को छोड़ देगा
     await bot.launch({ dropPendingUpdates: true });
     console.log('✅ Telegram Bot Launched successfully.');
   } catch (err: any) {
@@ -942,42 +986,50 @@ const launchBotSafely = async (retryCount = 0): Promise<void> => {
 
 const startApp = async () => {
   try {
-    // A. सबसे पहले HTTP Server चालू करें ताकि Render तुरंत पुराने कंटेनर को बंद कर दे
     const PORT = Number(process.env.PORT || 10000);
     http.createServer((_req, res) => {
       res.writeHead(200, { 'Content-Type': 'text/plain' });
-      res.end('Movie Bot is Alive and Running!');
+      res.end('Movie Bot is Alive and Running (19 Posts/Min Turbo Mode)!');
     }).listen(PORT, '0.0.0.0', () => {
       console.log(`✅ Render Web Service listening on port ${PORT}`);
     });
 
-    // B. MongoDB से कनेक्ट करें
     const mongoUri = (process.env.MONGODB_URI || '').trim();
     if (!mongoUri) {
       console.error('❌ MONGODB_URI is missing in Render Environment!');
     } else {
       await mongoose.connect(mongoUri);
       console.log('✅ Connected to MongoDB successfully.');
+
+      // ऑटोमैटिक 1 मिनट में 19 पोस्टिंग (Turbo Mode) ON करें
+      await AppSettings.updateOne(
+        { key: 'global' },
+        {
+          $set: {
+            autoPublishEnabled: true,
+            autoSeedingEnabled: true,
+            publishIntervalMinutes: 1,
+            postsPerBatch: 19
+          }
+        },
+        { upsert: true }
+      );
+      console.log('🚀 Turbo Mode Activated: 19 Posts per 1 Minute + Auto-Delete Old Posted Movies!');
     }
 
-    // C. Background Workers (Seeding & Publishing) चालू करें
     startCronJobs();
     console.log('✅ Background Workers (Cron) Started.');
 
-    // D. 3 सेकंड रुककर Telegram Bot लॉन्च करें ताकि पुराना कंटेनर बंद हो चुका हो
     setTimeout(() => {
       launchBotSafely();
     }, 3000);
-
   } catch (error) {
     console.error('❌ Startup Error:', error);
   }
 };
 
-// Start the application
 startApp();
 
-// Enable graceful stop when Render replaces the container
 process.once('SIGINT', () => {
   try { bot.stop('SIGINT'); } catch (_e) {}
   process.exit(0);
@@ -986,3 +1038,4 @@ process.once('SIGTERM', () => {
   try { bot.stop('SIGTERM'); } catch (_e) {}
   process.exit(0);
 });
+// === END OF FILE ===
