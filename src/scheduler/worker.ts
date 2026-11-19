@@ -107,16 +107,19 @@ export const runWorkerCycle = async (forceNow = false): Promise<void> => {
         key: 'global',
         autoSeedingEnabled: true,
         autoPublishEnabled: true,
-        publishIntervalMinutes: 5,
-        postsPerBatch: 10
+        publishIntervalMinutes: 1,
+        postsPerBatch: 15
       });
     }
 
-    const now = Date.now();
-    const intervalMs = Math.max(1, Number(settings.publishIntervalMinutes || 5)) * 60 * 1000;
+    const cycleStartTime = new Date();
+    const now = cycleStartTime.getTime();
+    const intervalMs = Math.max(1, Number(settings.publishIntervalMinutes || 1)) * 60 * 1000;
     const lastPub = settings.lastPublishAt ? new Date(settings.lastPublishAt).getTime() : 0;
+    const graceMs = intervalMs >= 5 * 60 * 1000 ? 45 * 1000 : 5 * 1000;
 
-    if (!forceNow && now - lastPub < intervalMs) {
+    if (!forceNow && now - lastPub < Math.max(0, intervalMs - graceMs)) {
+      console.log(`⏭️ Skipping: next batch in ${Math.ceil((intervalMs - (now - lastPub)) / 1000)}s`);
       return;
     }
 
