@@ -37,7 +37,6 @@ MediaItemSchema.index({ tmdbId: 1, mediaType: 1 }, { unique: true });
 MediaItemSchema.index({ title: 1 });
 MediaItemSchema.index({ isPublished: 1, userRequested: -1, requestedAt: 1, releaseDate: -1 });
 
-// Permanent lightweight record of posted items to prevent duplication forever
 const PostedHistorySchema = new mongoose.Schema(
   {
     tmdbId: { type: Number, required: true },
@@ -62,7 +61,6 @@ const MonthJobSchema = new mongoose.Schema(
   },
   { timestamps: true }
 );
-
 MonthJobSchema.index({ month: 1, mediaType: 1 }, { unique: true });
 
 const AppSettingsSchema = new mongoose.Schema(
@@ -71,8 +69,8 @@ const AppSettingsSchema = new mongoose.Schema(
     autoSeedingEnabled: { type: Boolean, default: true },
     autoPublishEnabled: { type: Boolean, default: true },
     aiEnabled: { type: Boolean, default: true },
-    publishIntervalMinutes: { type: Number, default: 1 },
-    postsPerBatch: { type: Number, default: 19 },
+    publishIntervalMinutes: { type: Number, default: 5 },
+    postsPerBatch: { type: Number, default: 10 },
     lastPublishAt: { type: Date, default: new Date(0) },
     lastSeedAt: { type: Date, default: new Date(0) },
     startMonth: { type: String, default: '2026-10' },
@@ -92,7 +90,8 @@ const BotUserSchema = new mongoose.Schema(
     telegramId: { type: Number, required: true, unique: true },
     firstName: { type: String, default: '' },
     username: { type: String, default: '' },
-    isBanned: { type: Boolean, default: false }
+    isBanned: { type: Boolean, default: false },
+    adminStep: { type: String, default: '' }
   },
   { timestamps: true }
 );
@@ -102,4 +101,3 @@ export const PostedHistory = mongoose.model<any>('PostedHistory', PostedHistoryS
 export const MonthJob = mongoose.model<any>('MonthJob', MonthJobSchema);
 export const AppSettings = mongoose.model<any>('AppSettings', AppSettingsSchema);
 export const BotUser = mongoose.model<any>('BotUser', BotUserSchema);
-// === END OF FILE ===
