@@ -24,12 +24,11 @@ let isJobRunning = false;
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
-// पहले से पोस्ट हो चुकी सभी पुरानी मूवीज़ को PostedHistory में सुरक्षित करके MediaItem से डिलीट करें
 export const cleanupOldPostedMovies = async () => {
   try {
     const oldPublished = await MediaItem.find({ isPublished: true })
       .select('_id tmdbId mediaType')
-      .limit(2000)
+      .limit(1000)
       .lean();
 
     if (oldPublished.length === 0) return;
@@ -43,10 +42,9 @@ export const cleanupOldPostedMovies = async () => {
     }));
 
     await PostedHistory.bulkWrite(historyOps, { ordered: false });
-
     const idsToDelete = oldPublished.map((itm: any) => itm._id);
     const delRes = await MediaItem.deleteMany({ _id: { $in: idsToDelete } });
-    console.log(`🧹 Cleaned up ${delRes.deletedCount} already-posted movies from DB (saved in PostedHistory).`);
+    console.log(`🧹 Cleaned ${delRes.deletedCount} posted movies.`);
   } catch (err: any) {
     console.error('Cleanup Old Posted Error:', err?.message);
   }
@@ -86,20 +84,13 @@ export const enrichMediaItemWithDetails = async (
     }
   }
 
-  // 19 posts/min बैच मोड में केवल तभी AI कॉल करें जब overview बिल्कुल खाली हो ताकि स्पीड स्लो न हो
   const needsAi = fastBatchMode
     ? !item.overview || item.overview.length < 15
-    : !item.overview ||
-      item.overview.length < 25 ||
-      !Array.isArray(item.genres) ||
-      item.genres.length === 0 ||
-      !item.runtime ||
-      !item.imdbRating;
+    : !item.overview || item.overview.length < 25 || !item.runtime || !item.imdbRating;
 
   if (aiEnabled && needsAi) {
     item = await enrichWithAI(item);
   }
-
   return item;
 };
 
@@ -108,7 +99,6 @@ export const runWorkerCycle = async (forceNow = false): Promise<void> => {
   isJobRunning = true;
 
   try {
-    // 0. पुरानी पोस्ट हो चुकी मूवीज़ को तुरंत साफ करें
     await cleanupOldPostedMovies();
 
     let settings: any = await AppSettings.findOne({ key: 'global' });
@@ -117,17 +107,16 @@ export const runWorkerCycle = async (forceNow = false): Promise<void> => {
         key: 'global',
         autoSeedingEnabled: true,
         autoPublishEnabled: true,
-        publishIntervalMinutes: 1,
-        postsPerBatch: 19
+        publishIntervalMinutes: 5,
+        postsPerBatch: 10
       });
     }
 
     const now = Date.now();
-    const intervalMs = Math.max(1, Number(settings.publishIntervalMinutes || 1)) * 60 * 1000;
+    const intervalMs = Math.max(1, Number(settings.publishIntervalMinutes || 5)) * 60 * 1000;
     const lastPub = settings.lastPublishAt ? new Date(settings.lastPublishAt).getTime() : 0;
 
     if (!forceNow && now - lastPub < intervalMs) {
-      isJobRunning = false;
       return;
     }
 
@@ -136,7 +125,7 @@ export const runWorkerCycle = async (forceNow = false): Promise<void> => {
       .map((s: string) => s.trim().toLowerCase())
       .filter(Boolean);
 
-    // 1. AUTO SEEDING (डुप्लीकेट मूवीज़ को PostedHistory से चेक करके स्किप करेगा)
+    // 1. OPTIMIZED AUTO SEEDING (1 DB read + 1 bulkWrite instead of 40 DB calls)
     if (settings.autoSeedingEnabled) {
       let activeJob: any = await MonthJob.findOne({ status: { $ne: 'COMPLETED' } }).sort({ month: -1 });
 
@@ -169,31 +158,43 @@ export const runWorkerCycle = async (forceNow = false): Promise<void> => {
         );
 
         if (data && Array.isArray(data.results)) {
-          for (const item of data.results) {
-            if (!item.poster_path) continue;
+          const validItems = data.results.filter((it: any) => Boolean(it.poster_path));
+          const candidateIds = validItems.map((it: any) => it.id);
 
-            const alreadyPosted = await PostedHistory.findOne({ tmdbId: item.id, mediaType }).lean();
-            if (alreadyPosted) continue;
+          const existingPosted = await PostedHistory.find({
+            tmdbId: { $in: candidateIds },
+            mediaType
+          })
+            .select('tmdbId')
+            .lean();
+          const postedSet = new Set(existingPosted.map((p: any) => p.tmdbId));
 
-            await MediaItem.updateOne(
-              { tmdbId: item.id, mediaType },
-              {
-                $set: {
-                  title: item.title || item.name || 'Untitled',
-                  originalTitle: item.original_title || item.original_name || '',
-                  originalLanguage: item.original_language || '',
-                  genres: mapGenreIds(item.genre_ids || []),
-                  overview: item.overview || '',
-                  posterPath: item.poster_path || '',
-                  backdropPath: item.backdrop_path || '',
-                  releaseDate: item.release_date || item.first_air_date || '',
-                  tmdbRating: item.vote_average || 0,
-                  voteCount: item.vote_count || 0,
-                  collectionMonth: activeJob.month
-                }
-              },
-              { upsert: true }
-            );
+          const bulkOps = validItems
+            .filter((item: any) => !postedSet.has(item.id))
+            .map((item: any) => ({
+              updateOne: {
+                filter: { tmdbId: item.id, mediaType },
+                update: {
+                  $set: {
+                    title: item.title || item.name || 'Untitled',
+                    originalTitle: item.original_title || item.original_name || '',
+                    originalLanguage: item.original_language || '',
+                    genres: mapGenreIds(item.genre_ids || []),
+                    overview: item.overview || '',
+                    posterPath: item.poster_path || '',
+                    backdropPath: item.backdrop_path || '',
+                    releaseDate: item.release_date || item.first_air_date || '',
+                    tmdbRating: item.vote_average || 0,
+                    voteCount: item.vote_count || 0,
+                    collectionMonth: activeJob.month
+                  }
+                },
+                upsert: true
+              }
+            }));
+
+          if (bulkOps.length > 0) {
+            await MediaItem.bulkWrite(bulkOps, { ordered: false });
           }
 
           const maxPages = Math.min(Number(data.total_pages || 1), 500);
@@ -204,7 +205,6 @@ export const runWorkerCycle = async (forceNow = false): Promise<void> => {
               activeJob.mediaType = 'tv';
               activeJob.currentPage = 1;
               activeJob.totalPages = 1;
-              activeJob.status = 'RUNNING';
             } else {
               activeJob.status = 'COMPLETED';
             }
@@ -220,12 +220,11 @@ export const runWorkerCycle = async (forceNow = false): Promise<void> => {
       }
     }
 
-    // 2. AUTO PUBLISHING (1 मिनट में 19 पोस्टिंग + पोस्ट होते ही पुराना डेटा डिलीट)
+    // 2. AUTO PUBLISHING
     const targetChannel = getTargetChannel();
     if (settings.autoPublishEnabled && targetChannel) {
-      const batchLimit = Math.min(20, Math.max(1, Number(settings.postsPerBatch || 19)));
+      const batchLimit = Math.min(20, Math.max(1, Number(settings.postsPerBatch || 10)));
 
-      // पहले यूज़र द्वारा मांगी गई मूवीज़ लें
       const priorityItems: any[] = await MediaItem.find({
         isPublished: false,
         userRequested: true
@@ -254,7 +253,6 @@ export const runWorkerCycle = async (forceNow = false): Promise<void> => {
       for (let i = 0; i < batchToPublish.length; i++) {
         let pendingItem = batchToPublish[i];
 
-        // डुप्लीकेट चेक: यदि पहले कभी पोस्ट हो चुकी है तो तुरंत डिलीट करें और आगे बढ़ें
         const alreadyDone = await PostedHistory.findOne({
           tmdbId: pendingItem.tmdbId,
           mediaType: pendingItem.mediaType
@@ -273,57 +271,44 @@ export const runWorkerCycle = async (forceNow = false): Promise<void> => {
         const caption = formatCaption(pendingItem, settings);
 
         try {
-          await sendPhotoSmart(
-            targetChannel,
-            pendingItem.posterPath || '',
-            caption
-          );
+          await sendPhotoSmart(targetChannel, pendingItem.posterPath || '', caption);
 
-          // 1. हमेशा के लिए PostedHistory में सेव करें ताकि दोबारा कभी पोस्ट न हो
           await PostedHistory.updateOne(
             { tmdbId: pendingItem.tmdbId, mediaType: pendingItem.mediaType },
             { $set: { tmdbId: pendingItem.tmdbId, mediaType: pendingItem.mediaType } },
             { upsert: true }
           );
-
-          // 2. पोस्ट हो चुकी मूवी को तुरंत MediaItem से डिलीट करें ताकि स्टोरेज खाली रहे
           await MediaItem.deleteOne({ _id: pendingItem._id });
 
           postedInThisCycle += 1;
           settings.lastPublishAt = new Date();
           await settings.save();
-          console.log(`✅ [${postedInThisCycle}/${batchToPublish.length}] Published & Deleted from Queue:${pendingItem.title}`);
+          console.log(`✅ [${postedInThisCycle}/${batchToPublish.length}] Published: ${pendingItem.title}`);
 
-          // यूज़र को नोटिफाई करें यदि उसने रिक्वेस्ट की थी
           if (Array.isArray(pendingItem.requestedBy) && pendingItem.requestedBy.length > 0) {
             const c1 = settings.channel01Url || 'https://t.me/yourchannel1';
             for (const uid of pendingItem.requestedBy) {
               try {
                 await bot.telegram.sendMessage(
                   uid,
-                  `🎉 <b>Good News!</b> Your requested title <b>${escapeHtml(pendingItem.title)}</b> has just been published to our channel!\n\n👉 <a href="${escapeHtml(c1)}"><b>VIEW ON CHANNEL NOW</b></a>`,
+                  `🎉 <b>Good News!</b> Your requested title <b>${escapeHtml(pendingItem.title)}</b> has just been published!\n\n👉 <a href="${escapeHtml(c1)}"><b>VIEW ON CHANNEL NOW</b></a>`,
                   { parse_mode: 'HTML' }
                 );
               } catch (_notifyErr) {}
             }
           }
 
-          // Telegram के 20 msg/min नियम का पालन करने के लिए अगली पोस्ट से पहले ~3.1 सेकंड रुकें
           if (i < batchToPublish.length - 1) {
-            await sleep(3100);
+            await sleep(3200);
           }
         } catch (postErr: any) {
           const retryAfter = postErr?.response?.parameters?.retry_after;
           if (retryAfter) {
-            console.warn(`⏳ Telegram FloodWait: sleeping for ${retryAfter}s...`);
+            console.warn(`⏳ Telegram FloodWait: sleeping ${retryAfter}s...`);
             await sleep((Number(retryAfter) + 1) * 1000);
           } else {
             console.error('Post send error:', postErr?.message);
-            await notifyAdminError(
-              'Telegram Publisher',
-              postErr,
-              'Click "Restart Render Server" or "Unlock & Retry Now" below.'
-            );
+            await notifyAdminError('Telegram Publisher', postErr, 'Check channel admin rights or retry from /admin.');
             break;
           }
         }
@@ -331,7 +316,7 @@ export const runWorkerCycle = async (forceNow = false): Promise<void> => {
     }
   } catch (error: any) {
     console.error('Worker Error:', error);
-    await notifyAdminError('Worker Cycle', error, 'Click "Restart Render Server" below to reboot cleanly.');
+    await notifyAdminError('Worker Cycle', error, 'Check logs or retry from /admin.');
   } finally {
     isJobRunning = false;
   }
@@ -347,4 +332,3 @@ export const startCronJobs = (): void => {
     await runWorkerCycle(false);
   });
 };
-// === END OF FILE ===
