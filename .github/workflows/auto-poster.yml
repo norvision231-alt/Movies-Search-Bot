@@ -1,0 +1,41 @@
+name: Movie Bot Auto-Poster
+
+on:
+  schedule:
+    - cron: '*/5 * * * *'
+  workflow_dispatch:
+
+concurrency:
+  group: movie-bot-worker
+  cancel-in-progress: false
+
+jobs:
+  seed-and-publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 4
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install & Build
+        run: |
+          npm ci
+          npm run build
+
+      - name: Run One Seeding & Publishing Cycle
+        env:
+          BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
+          MONGODB_URI: ${{ secrets.MONGODB_URI }}
+          TMDB_API_TOKEN: ${{ secrets.TMDB_API_TOKEN }}
+          LOG_CHANNEL: ${{ secrets.LOG_CHANNEL }}
+          ADMIN_ID: ${{ secrets.ADMIN_ID }}
+          CHATGPT_API_KEY: ${{ secrets.CHATGPT_API_KEY }}
+          DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+        run: npm run worker:once
