@@ -226,7 +226,7 @@ export const runWorkerCycle = async (forceNow = false): Promise<void> => {
     // 2. AUTO PUBLISHING
     const targetChannel = getTargetChannel();
     if (settings.autoPublishEnabled && targetChannel) {
-      const batchLimit = Math.min(20, Math.max(1, Number(settings.postsPerBatch || 10)));
+     const batchLimit = Math.min(20, Math.max(1, Number(settings.postsPerBatch || 15)));
 
       const priorityItems: any[] = await MediaItem.find({
         isPublished: false,
@@ -284,7 +284,7 @@ export const runWorkerCycle = async (forceNow = false): Promise<void> => {
           await MediaItem.deleteOne({ _id: pendingItem._id });
 
           postedInThisCycle += 1;
-          settings.lastPublishAt = new Date();
+        settings.lastPublishAt = cycleStartTime;
           await settings.save();
           console.log(`✅ [${postedInThisCycle}/${batchToPublish.length}] Published: ${pendingItem.title}`);
 
