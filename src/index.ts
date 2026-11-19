@@ -288,8 +288,8 @@ const queueMovieForChannelAndGetTimer = async (item: any, userId?: number, setti
   });
   const position = aheadCount + 1;
 
-  const intervalMins = Math.max(1, Number(settings?.publishIntervalMinutes || 5));
-  const postsPerBatch = Math.max(1, Number(settings?.postsPerBatch || 10));
+  const intervalMins = Math.max(1, Number(settings?.publishIntervalMinutes || 1));
+  const postsPerBatch = Math.max(1, Number(settings?.postsPerBatch || 15));
   const batchesAhead = Math.floor((position - 1) / postsPerBatch);
   const slotInBatch = (position - 1) % postsPerBatch;
 
@@ -373,8 +373,8 @@ const renderAdminPanel = async (ctx: any, edit = false) => {
     MonthJob.findOne({ status: { $ne: 'COMPLETED' } }).sort({ month: -1 }).lean()
   ]);
 
-  const mins = s.publishIntervalMinutes || 5;
-  const batch = s.postsPerBatch || 10;
+  const mins = s.publishIntervalMinutes || 1;
+  const batch = s.postsPerBatch || 15;
 
   const text =
     `👑 <b>MASTER ADMIN CONTROL PANEL</b>\n` +
@@ -435,7 +435,7 @@ const renderAdminPanel = async (ctx: any, edit = false) => {
 };
 
 bot.start((ctx) => {
-  ctx.replyWithHTML(
+  return ctx.replyWithHTML(
     '🎬 <b>Welcome to the Movie & Web-Series Bot!</b>\n\n' +
       '🔎 <b>How to Search:</b> Send any Movie or Web-Series title (e.g., <code>Kingsman</code>, <code>Inception 2010</code>).\n' +
       '⏳ If a title is not yet on our channel, it gets added to the <b>Priority Auto-Post Queue</b> with a live timer!\n' +
@@ -444,7 +444,7 @@ bot.start((ctx) => {
 });
 
 bot.help((ctx) => {
-  ctx.replyWithHTML(
+  return ctx.replyWithHTML(
     '📌 <b>Commands:</b>\n' +
       '• <code>/search &lt;title&gt;</code> - Search by title\n' +
       '• <code>/latest</code> - Latest 10 titles\n' +
@@ -598,6 +598,7 @@ bot.action(/^admin_preset_(\d+)_(\d+)$/, async (ctx) => {
   await ctx.answerCbQuery(`Set: ${batch} Posts / ${mins}m`);
   return renderAdminPanel(ctx, true);
 });
+
 bot.action('admin_menu_links', async (ctx) => {
   if (!isAdmin(ctx.from?.id)) return ctx.answerCbQuery('Admins only');
   const s: any = await AppSettings.findOne({ key: 'global' }).lean();
@@ -624,7 +625,8 @@ const promptStep = (actionName: string, stepName: string, msg: string) => {
   });
 };
 
-promptStep('admin_prompt_time', 'SET_TIME', '⏱️ Send custom interval in minutes (e.g. 5), or /cancel:');
+promptStep('admin_prompt_time', 'SET_TIME', '⏱️ Send custom interval in minutes (e.g. 1, 5, 15), or /cancel:');
+promptStep('admin_prompt_batch', 'SET_BATCH', '🔢 Send posts per batch (1 to 20), or /cancel:');
 promptStep('admin_link_c1', 'LINK_C1', '🔗 Send new URL for CHANNEL 01, or /cancel:');
 promptStep('admin_link_c2', 'LINK_C2', '🔗 Send new URL for CHANNEL 02, or /cancel:');
 promptStep('admin_link_prem', 'LINK_PREM', '💎 Send new URL for PREMIUM CONTENT, or /cancel:');
@@ -661,7 +663,7 @@ bot.command('status', async (ctx) => {
     AppSettings.findOne({ key: 'global' }).lean()
   ]);
   return ctx.replyWithHTML(
-    `📊 <b>Status:</b>\n🌱 Seeding: ${s?.autoSeedingEnabled ? 'ON' : 'OFF'}\n📤 Publish: ${s?.autoPublishEnabled ? 'ON' : 'OFF'} (${s?.postsPerBatch || 10} Posts / ${s?.publishIntervalMinutes || 5}m)\n📅 Month: ${job ? `${job.month} P${job.currentPage}/${job.totalPages}` : 'Idle'}\n✅ Posted: ${postedHistoryCount} | ⏳ Queue: ${pend} (🔥 Priority: ${prio})`
+    `📊 <b>Status:</b>\n🌱 Seeding: ${s?.autoSeedingEnabled ? 'ON' : 'OFF'}\n📤 Publish: ${s?.autoPublishEnabled ? 'ON' : 'OFF'} (${s?.postsPerBatch || 15} Posts / ${s?.publishIntervalMinutes || 1}m)\n📅 Month: ${job ? `${job.month} P${job.currentPage}/${job.totalPages}` : 'Idle'}\n✅ Posted: ${postedHistoryCount} | ⏳ Queue: ${pend} (🔥 Priority: ${prio})`
   );
 });
 
@@ -869,7 +871,8 @@ bot.on('message', async (ctx: any) => {
     else if (step === 'LINK_PREM') await AppSettings.updateOne({ key: 'global' }, { $set: { premiumUrl: t } }, { upsert: true });
     else if (step === 'LINK_ADULT') await AppSettings.updateOne({ key: 'global' }, { $set: { adultContentUrl: t } }, { upsert: true });
     else if (step === 'SET_RATING') await AppSettings.updateOne({ key: 'global' }, { $set: { ourRating: t } }, { upsert: true });
-    else if (step === 'SET_TIME') await AppSettings.updateOne({ key: 'global' }, { $set: { publishIntervalMinutes: Math.max(1, Number(t) || 5) } }, { upsert: true });
+    else if (step === 'SET_TIME') await AppSettings.updateOne({ key: 'global' }, { $set: { publishIntervalMinutes: Math.max(1, Number(t) || 1) } }, { upsert: true });
+    else if (step === 'SET_BATCH') await AppSettings.updateOne({ key: 'global' }, { $set: { postsPerBatch: Math.min(20, Math.max(1, Number(t) || 15)) } }, { upsert: true });
     else if (step === 'BAN_USER' && Number(t)) await BotUser.findOneAndUpdate({ telegramId: Number(t) }, { $set: { isBanned: true } }, { upsert: true });
     else if (step === 'UNBAN_USER' && Number(t)) await BotUser.findOneAndUpdate({ telegramId: Number(t) }, { $set: { isBanned: false } }, { upsert: true });
 
@@ -901,7 +904,7 @@ const startApp = async () => {
   await ensureDbConnected();
   await AppSettings.updateOne(
     { key: 'global' },
-    { $setOnInsert: { autoPublishEnabled: true, autoSeedingEnabled: true, publishIntervalMinutes: 5, postsPerBatch: 10 } },
+    { $setOnInsert: { autoPublishEnabled: true, autoSeedingEnabled: true, publishIntervalMinutes: 1, postsPerBatch: 15 } },
     { upsert: true }
   );
 
