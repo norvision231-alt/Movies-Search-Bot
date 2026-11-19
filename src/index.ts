@@ -19,6 +19,20 @@ if (!token) throw new Error('BOT_TOKEN is missing');
 
 export const bot = new Telegraf(token);
 
+let dbConnectPromise: Promise<typeof mongoose> | null = null;
+export const ensureDbConnected = async (): Promise<void> => {
+  if (mongoose.connection.readyState === 1) return;
+  const mongoUri = (process.env.MONGODB_URI || '').trim();
+  if (!mongoUri) throw new Error('MONGODB_URI is missing');
+  if (!dbConnectPromise) {
+    dbConnectPromise = mongoose.connect(mongoUri, {
+      maxPoolSize: 10,
+      serverSelectionTimeoutMS: 8000
+    });
+  }
+  await dbConnectPromise;
+};
+
 let triggerWorkerNow: (() => Promise<void>) | null = null;
 export const registerWorkerTrigger = (fn: () => Promise<void>) => {
   triggerWorkerNow = fn;
@@ -31,38 +45,32 @@ export const registerWorkerReset = (fn: () => void) => {
 
 const adminSession = new Map<number, { step: string }>();
 
-export const getTargetChannel = (): string => {
-  return (process.env.LOG_CHANNEL || process.env.TELEGRAM_MAIN_CHANNEL_ID || '').trim();
-};
+export const getTargetChannel = (): string =>
+  (process.env.LOG_CHANNEL || process.env.TELEGRAM_MAIN_CHANNEL_ID || '').trim();
 
-export const getAdminIds = (): string[] => {
-  const raw = (process.env.ADMIN_ID || process.env.ADMIN_TELEGRAM_IDS || '').trim();
-  return raw.split(',').map((id: string) => id.trim()).filter(Boolean);
-};
+export const getAdminIds = (): string[] =>
+  (process.env.ADMIN_ID || process.env.ADMIN_TELEGRAM_IDS || '')
+    .split(',')
+    .map((id: string) => id.trim())
+    .filter(Boolean);
 
-export const isAdmin = (userId?: number): boolean => {
-  return Boolean(userId && getAdminIds().includes(String(userId)));
-};
+export const isAdmin = (userId?: number): boolean =>
+  Boolean(userId && getAdminIds().includes(String(userId)));
 
-export const escapeHtml = (unsafe: string = ''): string => {
-  return String(unsafe)
+export const escapeHtml = (unsafe: string = ''): string =>
+  String(unsafe)
     .replace(/&/g, '&amp;')
     .replace(/</g, '&lt;')
     .replace(/>/g, '&gt;')
     .replace(/"/g, '&quot;');
-};
 
 export const formatRuntimeHoursMins = (totalMinutes?: number): string => {
   const mins = Number(totalMinutes || 0);
   if (!mins || mins <= 0) return '';
   const hours = Math.floor(mins / 60);
   const remMins = mins % 60;
-  if (hours > 0 && remMins > 0) {
-    return `${hours} ${hours === 1 ? 'hour' : 'hours'} ${remMins} min`;
-  }
-  if (hours > 0) {
-    return `${hours} ${hours === 1 ? 'hour' : 'hours'}`;
-  }
+  if (hours > 0 && remMins > 0) return `${hours} ${hours === 1 ? 'hour' : 'hours'} ${remMins} min`;
+  if (hours > 0) return `${hours} ${hours === 1 ? 'hour' : 'hours'}`;
   return `${remMins} min`;
 };
 
@@ -80,7 +88,9 @@ const createSeoHashtags = (media: any, langName: string): string => {
   const genreTags = Array.isArray(media.genres)
     ? media.genres.slice(0, 3).map((g: string) => `#${String(g).replace(/[^a-zA-Z0-9]/g, '')}`).join(' ')
     : '';
-  return [cleanTitle ? `#${cleanTitle}` : '', year ? `#Release${year}` : '', langTag ? `#${langTag}` : '', typeTag, genreTags, '#HDMovies'].filter(Boolean).join(' ');
+  return [cleanTitle ? `#${cleanTitle}` : '', year ? `#Release${year}` : '', langTag ? `#${langTag}` : '', typeTag, genreTags, '#HDMovies']
+    .filter(Boolean)
+    .join(' ');
 };
 
 export const getDisplayLanguages = (media: any): string => {
@@ -93,6 +103,7 @@ export const getDisplayLanguages = (media: any): string => {
   return String(media.originalLanguage || 'English').toUpperCase();
 };
 
+// Strictly stays within Telegram's 1024-char photo caption limit
 export const formatCaption = (media: any, settings: any, extraFooterHtml = ''): string => {
   const title = escapeHtml(media.title || 'Untitled');
   const year = media.releaseDate ? escapeHtml(String(media.releaseDate).substring(0, 4)) : 'N/A';
@@ -109,51 +120,34 @@ export const formatCaption = (media: any, settings: any, extraFooterHtml = ''): 
       ? `${Number(media.tmdbRating).toFixed(1)}/10`
       : 'New Release';
 
-  const rawOverview = media.overview ? String(media.overview).trim() : '';
-  const fallbackDesc = `Watch ${media.title} (${year}), an engaging ${genres.toLowerCase()} ${
-    media.mediaType === 'tv' ? 'web series' : 'movie'
-  } available in ${langDisplay} in HD quality.`;
-  const descSource = rawOverview.length > 15 ? rawOverview : fallbackDesc;
-  const shortOverview =
-    descSource.length > 240 ? `${escapeHtml(descSource.substring(0, 237))}...` : escapeHtml(descSource);
-
   const c1 = (settings?.channel01Url || 'https://t.me/yourchannel1').trim();
   const c2 = (settings?.channel02Url || 'https://t.me/yourchannel2').trim();
   const prem = (settings?.premiumUrl || c1).trim();
   const adult = (settings?.adultContentUrl || c2).trim();
   const ourRating = String(settings?.ourRating || '4.7/5').trim();
 
-  const lines: string[] = [`🔥 <b>${title}</b> (${year})`];
+  const headerLines: string[] = [`🔥 <b>${title}</b> (${year})`];
   if (media.imdbRating) {
-    lines.push(`⭐ <b>IMDb:</b> ${escapeHtml(String(media.imdbRating))}`);
+    headerLines.push(`⭐ <b>IMDb:</b> ${escapeHtml(String(media.imdbRating))}`);
   } else if (media.imdbId) {
-    lines.push(`⭐ <b>IMDb:</b> <a href="https://www.imdb.com/title/${escapeHtml(media.imdbId)}/"><b>Verified on IMDb</b></a>`);
+    headerLines.push(`⭐ <b>IMDb:</b> <a href="https://www.imdb.com/title/${escapeHtml(media.imdbId)}/"><b>Verified on IMDb</b></a>`);
   }
-  if (media.rtRating) {
-    lines.push(`🍅 <b>RT Audience:</b> ${escapeHtml(String(media.rtRating))}`);
-  }
-  lines.push(
-    `🌐 <b>Available in:</b> ${escapeHtml(langDisplay)}`,
-    `🎭 <b>Genre:</b> ${genres}`
-  );
+  if (media.rtRating) headerLines.push(`🍅 <b>RT Audience:</b> ${escapeHtml(String(media.rtRating))}`);
+
+  headerLines.push(`🌐 <b>Available in:</b> ${escapeHtml(langDisplay)}`, `🎭 <b>Genre:</b> ${genres}`);
+
   if (media.mediaType === 'tv' && media.seasonCount && Number(media.seasonCount) > 0) {
     const ep = media.episodeCount ? ` (${media.episodeCount} Episodes)` : '';
-    lines.push(`📺 <b>Seasons:</b> ${escapeHtml(String(media.seasonCount))}${escapeHtml(ep)}`);
+    headerLines.push(`📺 <b>Seasons:</b> ${escapeHtml(String(media.seasonCount))}${escapeHtml(ep)}`);
   }
-  const formattedRuntime = formatRuntimeHoursMins(media.runtime);
-  if (formattedRuntime) {
-    lines.push(`⏱️ <b>Runtime:</b> ${escapeHtml(formattedRuntime)}`);
-  }
-  lines.push(`⭐ <b>TMDB Rating:</b> ${escapeHtml(tmdbRating)}`);
-  if (ourRating) {
-    lines.push(`🔥 <b>Our Rating:</b> ${escapeHtml(ourRating)}`);
-  }
-  // Our Rating के ठीक नीचे Release Date
-  lines.push(`📅 <b>Release Date:</b> ${fullReleaseDate}`);
 
-  lines.push(
-    '',
-    `<i>${shortOverview}</i>`,
+  const formattedRuntime = formatRuntimeHoursMins(media.runtime);
+  if (formattedRuntime) headerLines.push(`⏱️ <b>Runtime:</b> ${escapeHtml(formattedRuntime)}`);
+  headerLines.push(`⭐ <b>TMDB Rating:</b> ${escapeHtml(tmdbRating)}`);
+  if (ourRating) headerLines.push(`🔥 <b>Our Rating:</b> ${escapeHtml(ourRating)}`);
+  headerLines.push(`📅 <b>Release Date:</b> ${fullReleaseDate}`);
+
+  const footerLines: string[] = [
     '━━━━━━━━━━━━━━',
     `🔗 <b>JOIN CHANNEL 01:</b> 👉 <a href="${escapeHtml(c1)}"><b>JOIN NOW</b></a>`,
     `🔗 <b>JOIN CHANNEL 02:</b> 👉 <a href="${escapeHtml(c2)}"><b>JOIN NOW</b></a>`,
@@ -161,21 +155,35 @@ export const formatCaption = (media: any, settings: any, extraFooterHtml = ''): 
     '━━━━━━━━━━━━━━',
     `🔞 <a href="${escapeHtml(adult)}"><b>18+ CONTENT ONLY</b></a>`,
     '⚠️ <i>Adults only where applicable. Viewer discretion advised.</i>'
-  );
+  ];
 
-  if (extraFooterHtml) {
-    lines.push('━━━━━━━━━━━━━━', extraFooterHtml);
+  if (extraFooterHtml) footerLines.push('━━━━━━━━━━━━━━', extraFooterHtml);
+  footerLines.push('', escapeHtml(createSeoHashtags(media, langDisplay)));
+
+  const headerBlock = headerLines.join('\n');
+  const footerBlock = footerLines.join('\n');
+
+  // Estimate visible text length (strip HTML tags for Telegram's 1024 visible-char limit)
+  const visibleLen = (s: string) => s.replace(/<[^>]+>/g, '').length;
+  const maxOverviewChars = Math.max(0, 1000 - visibleLen(headerBlock) - visibleLen(footerBlock) - 10);
+
+  const rawOverview = media.overview ? String(media.overview).trim() : '';
+  const fallbackDesc = `Watch ${media.title} (${year}), an engaging ${genres.toLowerCase()} ${
+    media.mediaType === 'tv' ? 'web series' : 'movie'
+  } available in ${langDisplay} in HD quality.`;
+  const descSource = rawOverview.length > 15 ? rawOverview : fallbackDesc;
+
+  if (maxOverviewChars > 30) {
+    const trimmed =
+      descSource.length > maxOverviewChars
+        ? `${descSource.substring(0, maxOverviewChars - 3)}...`
+        : descSource;
+    return `${headerBlock}\n\n<i>${escapeHtml(trimmed)}</i>\n${footerBlock}`;
   }
-
-  lines.push('', escapeHtml(createSeoHashtags(media, langDisplay)));
-  return lines.join('\n');
+  return `${headerBlock}\n${footerBlock}`;
 };
 
-export const buildPostKeyboard = (_settings: any): Record<string, any> => {
-  return {};
-};
-
-// 4-Layer Smart Photo Sender with FloodWait Retry
+// Zero-Waste Photo Sender: Telegram fetches image directly; buffer fallback ONLY on fetch failure
 export const sendPhotoSmart = async (
   chatId: string | number,
   posterPath: string,
@@ -187,66 +195,49 @@ export const sendPhotoSmart = async (
     const url500 = `https://image.tmdb.org/t/p/w500${normalizedPath}`;
     const url342 = `https://image.tmdb.org/t/p/w342${normalizedPath}`;
 
-    // Layer 1: Direct URL send
+    // Layer 1: Direct URL (0 server outbound bandwidth!)
     try {
       return await bot.telegram.sendPhoto(chatId, url500, { caption, parse_mode: 'HTML' });
     } catch (err1: any) {
       if (err1?.response?.parameters?.retry_after) throw err1;
-      console.warn('Direct URL photo failed, downloading w500 buffer via Axios...');
+      const desc = String(err1?.response?.description || err1?.message || '');
+      // Do NOT download image if caption or chat error caused the failure
+      if (desc.includes('caption') || desc.includes('chat not found') || desc.includes('kicked')) {
+        return await bot.telegram.sendMessage(chatId, caption, {
+          parse_mode: 'HTML',
+          link_preview_options: { is_disabled: true }
+        } as any);
+      }
     }
 
-    // Layer 2: Download w500 image buffer & upload binary to Telegram
+    // Layer 2: Lighter w342 direct URL (still 0 server bandwidth!)
     try {
-      const response = await axios.get(url500, {
-        responseType: 'arraybuffer',
-        timeout: 15000,
-        headers: { 'User-Agent': 'Mozilla/5.0', Accept: 'image/*' }
-      });
-      const imageBuffer = Buffer.from(response.data);
-      return await bot.telegram.sendPhoto(
-        chatId,
-        { source: imageBuffer, filename: 'poster.jpg' },
-        { caption, parse_mode: 'HTML' }
-      );
+      return await bot.telegram.sendPhoto(chatId, url342, { caption, parse_mode: 'HTML' });
     } catch (err2: any) {
       if (err2?.response?.parameters?.retry_after) throw err2;
-      console.warn('w500 buffer failed, trying lighter w342 buffer...');
     }
 
-    // Layer 3: Download lighter w342 image buffer & upload binary to Telegram
+    // Layer 3: Last-resort w342 binary buffer (much smaller than w500)
     try {
       const responseSmall = await axios.get(url342, {
         responseType: 'arraybuffer',
-        timeout: 15000,
+        timeout: 12000,
         headers: { 'User-Agent': 'Mozilla/5.0', Accept: 'image/*' }
       });
-      const smallBuffer = Buffer.from(responseSmall.data);
       return await bot.telegram.sendPhoto(
         chatId,
-        { source: smallBuffer, filename: 'poster.jpg' },
+        { source: Buffer.from(responseSmall.data), filename: 'poster.jpg' },
         { caption, parse_mode: 'HTML' }
       );
     } catch (err3: any) {
       if (err3?.response?.parameters?.retry_after) throw err3;
-      console.warn('All poster download attempts failed, falling back to text post.');
     }
   }
 
-  // Layer 4: Clean text fallback so the queue never gets stuck
   return await bot.telegram.sendMessage(chatId, caption, {
     parse_mode: 'HTML',
     link_preview_options: { is_disabled: true }
   } as any);
-};
-
-export const sendToLogChannel = async (message: string): Promise<void> => {
-  const target = getTargetChannel();
-  if (!target) return;
-  try {
-    await bot.telegram.sendMessage(target, message, { parse_mode: 'HTML' });
-  } catch (e) {
-    console.error('Log channel error:', e);
-  }
 };
 
 export const notifyAdminError = async (source: string, error: any, fixHint = '') => {
@@ -254,16 +245,12 @@ export const notifyAdminError = async (source: string, error: any, fixHint = '')
   const msg =
     `🚨 <b>ERROR ALERT [${escapeHtml(source)}]</b>\n\n` +
     `❌ <b>Error:</b> <code>${errMsg}</code>\n` +
-    `🛠️ <b>Fix:</b> ${escapeHtml(fixHint || 'Use buttons below to retry or restart Render service.')}`;
+    `🛠️ <b>Fix:</b> ${escapeHtml(fixHint || 'Check /admin settings.')}`;
   for (const id of getAdminIds()) {
     try {
       await bot.telegram.sendMessage(id, msg, {
         parse_mode: 'HTML',
         ...Markup.inlineKeyboard([
-          [
-            Markup.button.callback('⚡ Unlock & Retry Now', 'admin_run_now'),
-            Markup.button.callback('🔄 Restart Render Server', 'admin_restart_server')
-          ],
           [Markup.button.callback('⚙️ Open Master Admin Panel', 'admin_home')]
         ])
       });
@@ -275,9 +262,7 @@ const queueMovieForChannelAndGetTimer = async (item: any, userId?: number, setti
   const alreadyPosted =
     item.isPublished ||
     (await PostedHistory.findOne({ tmdbId: item.tmdbId, mediaType: item.mediaType }).lean());
-  if (alreadyPosted) {
-    return `✅ <b>Channel Status:</b> Already Published on Channel!`;
-  }
+  if (alreadyPosted) return `✅ <b>Channel Status:</b> Already Published on Channel!`;
 
   if (!item.userRequested) {
     item.userRequested = true;
@@ -295,8 +280,8 @@ const queueMovieForChannelAndGetTimer = async (item: any, userId?: number, setti
   });
   const position = aheadCount + 1;
 
-  const intervalMins = Math.max(1, Number(settings?.publishIntervalMinutes || 1));
-  const postsPerBatch = Math.max(1, Number(settings?.postsPerBatch || 19));
+  const intervalMins = Math.max(1, Number(settings?.publishIntervalMinutes || 5));
+  const postsPerBatch = Math.max(1, Number(settings?.postsPerBatch || 10));
   const batchesAhead = Math.floor((position - 1) / postsPerBatch);
   const slotInBatch = (position - 1) % postsPerBatch;
 
@@ -315,16 +300,14 @@ const queueMovieForChannelAndGetTimer = async (item: any, userId?: number, setti
 
   const timerText = waitMins > 0 ? `${waitMins} min ${remSec} sec` : `${remSec} sec`;
   return (
-    `⏳ <b>Channel Auto-Post Queue:</b> Added at Position <b>#${position}</b>\n` +
-    `⏰ <b>Estimated Post Time:</b> In <b>${timerText}</b> (around <b>${istTimeStr} IST</b>)\n` +
-    `🔔 <i>You will receive an automatic alert as soon as it is posted!</i>`
+    `⏳ <b>Channel Auto-Post Queue:</b> Position <b>#${position}</b>\n` +
+    `⏰ <b>Est. Post Time:</b> ~<b>${timerText}</b> (<b>${istTimeStr} IST</b>)`
   );
 };
 
 export const sendMediaCardToChat = async (ctx: any, item: any) => {
   let s: any = await AppSettings.findOne({ key: 'global' });
   if (!s) s = await AppSettings.create({ key: 'global' });
-
   const queueTimerHtml = await queueMovieForChannelAndGetTimer(item, ctx.from?.id, s);
   const caption = formatCaption(item, s, queueTimerHtml);
   return sendPhotoSmart(ctx.chat.id, item.posterPath || '', caption);
@@ -344,11 +327,7 @@ const calcSimilarity = (a: string, b: string): number => {
   for (let j = 1; j <= s2.length; j += 1) {
     for (let i = 1; i <= s1.length; i += 1) {
       const ind = s1[i - 1] === s2[j - 1] ? 0 : 1;
-      track[j][i] = Math.min(
-        track[j][i - 1] + 1,
-        track[j - 1][i] + 1,
-        track[j - 1][i - 1] + ind
-      );
+      track[j][i] = Math.min(track[j][i - 1] + 1, track[j - 1][i] + 1, track[j - 1][i - 1] + ind);
     }
   }
   const distance = track[s2.length][s1.length];
@@ -357,13 +336,14 @@ const calcSimilarity = (a: string, b: string): number => {
 };
 
 bot.use(async (ctx, next) => {
+  await ensureDbConnected();
   if (ctx.from && ctx.chat?.type === 'private') {
     try {
       const u: any = await BotUser.findOneAndUpdate(
         { telegramId: ctx.from.id },
         { $set: { firstName: ctx.from.first_name || '', username: ctx.from.username || '' } },
         { upsert: true, new: true }
-      );
+      ).lean();
       if (u?.isBanned && !isAdmin(ctx.from.id)) {
         return ctx.reply('🚫 You are banned from using this bot.');
       }
@@ -381,10 +361,10 @@ const renderAdminPanel = async (ctx: any, edit = false) => {
     MediaItem.countDocuments({ isPublished: false, userRequested: true }),
     BotUser.countDocuments(),
     BotUser.countDocuments({ isBanned: true }),
-    MonthJob.findOne({ status: { $ne: 'COMPLETED' } }).sort({ month: -1 })
+    MonthJob.findOne({ status: { $ne: 'COMPLETED' } }).sort({ month: -1 }).lean()
   ]);
-  const mins = s.publishIntervalMinutes || 1;
-  const batch = s.postsPerBatch || 19;
+  const mins = s.publishIntervalMinutes || 5;
+  const batch = s.postsPerBatch || 10;
 
   const text =
     `👑 <b>MASTER ADMIN CONTROL PANEL</b>\n` +
@@ -392,13 +372,12 @@ const renderAdminPanel = async (ctx: any, edit = false) => {
     `🌱 <b>Auto Seeding:</b> ${s.autoSeedingEnabled ? '🟢 RUNNING' : '🔴 PAUSED'}\n` +
     `📤 <b>Auto Publishing:</b> ${s.autoPublishEnabled ? '🟢 RUNNING' : '🔴 PAUSED'}\n` +
     `🚀 <b>Posting Speed:</b> <code>${batch} Movies / ${mins} Min</code>\n` +
-    `🤖 <b>AI Fallback (GPT/DeepSeek):</b> ${s.aiEnabled !== false ? '🟢 ACTIVE' : '🔴 OFF'}\n` +
+    `🤖 <b>AI Fallback:</b> ${s.aiEnabled !== false ? '🟢 ACTIVE' : '🔴 OFF'}\n` +
     `📅 <b>Active Month:</b> <code>${activeJob ? `${activeJob.month} (${String(activeJob.mediaType).toUpperCase()} P${activeJob.currentPage}/${activeJob.totalPages})` : 'Idle'}</code>\n` +
     `⭐ <b>Our Rating:</b> <code>${escapeHtml(s.ourRating || '4.7/5')}</code>\n` +
     `━━━━━━━━━━━━━━━━━━━━\n` +
-    `⏳ <b>Unposted Queue:</b> ${totalInQueue} | ✅ <b>Posted & Cleaned:</b> ${postedHistoryCount}\n` +
-    `🔥 <b>User Priority Queue:</b> ${priorityQueue}\n` +
-    `👥 <b>Users:</b> ${totalUsers} | 🚫 <b>Banned:</b> ${bannedUsers}`;
+    `⏳ <b>Queue:</b> ${totalInQueue} | ✅ <b>Posted:</b> ${postedHistoryCount}\n` +
+    `🔥 <b>Priority:</b> ${priorityQueue} | 👥 <b>Users:</b> ${totalUsers} (🚫 ${bannedUsers})`;
 
   const kb = Markup.inlineKeyboard([
     [
@@ -406,7 +385,7 @@ const renderAdminPanel = async (ctx: any, edit = false) => {
       Markup.button.callback(s.autoSeedingEnabled ? '⏸️ Stop Seeding' : '▶️ Start Seeding', 'admin_toggle_seed')
     ],
     [
-      Markup.button.callback('🚀 Turbo (19/Min)', 'admin_speed_turbo'),
+      Markup.button.callback('🚀 10 Posts / 5m', 'admin_speed_eco'),
       Markup.button.callback(`⏱️ Speed (${batch}/${mins}m)`, 'admin_menu_time')
     ],
     [
@@ -430,10 +409,9 @@ const renderAdminPanel = async (ctx: any, edit = false) => {
       Markup.button.callback('🧹 Clean Invalid Queue', 'admin_clean_queue')
     ],
     [
-      Markup.button.callback('🔄 Restart Render Server', 'admin_restart_server'),
-      Markup.button.callback('🛑 Emergency Stop All', 'admin_stop_all')
-    ],
-    [Markup.button.callback('🔃 Refresh Panel Status', 'admin_home')]
+      Markup.button.callback('🛑 Emergency Stop All', 'admin_stop_all'),
+      Markup.button.callback('🔃 Refresh Panel', 'admin_home')
+    ]
   ]);
 
   if (edit && ctx.callbackQuery) {
@@ -446,70 +424,34 @@ const renderAdminPanel = async (ctx: any, edit = false) => {
   return ctx.replyWithHTML(text, kb);
 };
 
-// Helper to restart Render service via Deploy Hook or Process Exit Reboot
-const executeRenderRestart = async (ctx: any) => {
-  if (resetWorkerLockFn) resetWorkerLockFn();
-  const deployHook = (process.env.RENDER_DEPLOY_HOOK_URL || '').trim();
-
-  await ctx.replyWithHTML(
-    '🔄 <b>Restarting Render Service & Clearing Locks...</b>\n' +
-      '✅ Auto-Seeding and Auto-Publishing (19 posts/min) will resume automatically in 10–15 seconds!'
-  );
-
-  await AppSettings.updateOne(
-    { key: 'global' },
-    { $set: { autoSeedingEnabled: true, autoPublishEnabled: true } },
-    { upsert: true }
-  );
-
-  if (deployHook) {
-    try {
-      await axios.post(deployHook, {}, { timeout: 8000 });
-    } catch (_e) {}
-  }
-
-  setTimeout(() => {
-    process.exit(1);
-  }, 1500);
-};
-
 bot.start((ctx) => {
   ctx.replyWithHTML(
     '🎬 <b>Welcome to the Movie & Web-Series Bot!</b>\n\n' +
-      '🔎 <b>How to Search:</b> Send the exact Movie or Web-Series title (e.g., <code>Stay Good</code>, <code>Kingsman</code>, <code>Inception 2010</code>).\n' +
-      '⏳ If a movie is not yet on our channel, the bot will automatically add it to the <b>Priority Auto-Post Queue</b> and give you a live timer!\n' +
+      '🔎 <b>How to Search:</b> Send any Movie or Web-Series title (e.g., <code>Kingsman</code>, <code>Inception 2010</code>).\n' +
+      '⏳ If a title is not yet on our channel, it gets added to the <b>Priority Auto-Post Queue</b> with a live timer!\n' +
       '🆕 Send <code>/latest</code> for recent releases.'
   );
 });
 
 bot.help((ctx) => {
   ctx.replyWithHTML(
-    '📌 <b>Search Guide & Commands:</b>\n\n' +
-      '✅ <b>Search Format:</b> <code>Movie Name</code> or <code>Movie Name Year</code>\n' +
+    '📌 <b>Commands:</b>\n' +
       '• <code>/search &lt;title&gt;</code> - Search by title\n' +
       '• <code>/latest</code> - Latest 10 titles\n' +
       '• <code>/status</code> - Bot & Queue status\n' +
-      '• <code>/admin</code> - Master Admin Panel\n' +
-      '• <code>/restart</code> - Restart Render Bot Service (Admin)'
+      '• <code>/admin</code> - Master Admin Panel'
   );
 });
 
 bot.command('admin', async (ctx) => {
-  if (!isAdmin(ctx.from?.id)) {
-    return ctx.reply(`⛔ Access Denied. Your ID: ${ctx.from?.id}. Add it to ADMIN_ID in Render.`);
-  }
+  if (!isAdmin(ctx.from?.id)) return ctx.reply(`⛔ Access Denied. Your ID: ${ctx.from?.id}`);
   adminSession.delete(ctx.from.id);
   return renderAdminPanel(ctx, false);
 });
 
-bot.command('restart', async (ctx) => {
-  if (!isAdmin(ctx.from?.id)) return ctx.reply('⛔ Admin only.');
-  return executeRenderRestart(ctx);
-});
-
 bot.command('cancel', async (ctx) => {
   if (ctx.from) adminSession.delete(ctx.from.id);
-  return ctx.reply('✅ Action cancelled. Send /admin to open panel.');
+  return ctx.reply('✅ Action cancelled.');
 });
 
 bot.command('ban', async (ctx) => {
@@ -535,27 +477,21 @@ bot.action('admin_home', async (ctx) => {
   return renderAdminPanel(ctx, true);
 });
 
-bot.action('admin_restart_server', async (ctx) => {
-  if (!isAdmin(ctx.from?.id)) return ctx.answerCbQuery('Admins only');
-  await ctx.answerCbQuery('Restarting Render Service...');
-  return executeRenderRestart(ctx);
-});
-
-bot.action('admin_speed_turbo', async (ctx) => {
+bot.action('admin_speed_eco', async (ctx) => {
   if (!isAdmin(ctx.from?.id)) return ctx.answerCbQuery('Admins only');
   await AppSettings.updateOne(
     { key: 'global' },
-    { $set: { publishIntervalMinutes: 1, postsPerBatch: 19, autoPublishEnabled: true } },
+    { $set: { publishIntervalMinutes: 5, postsPerBatch: 10, autoPublishEnabled: true } },
     { upsert: true }
   );
-  await ctx.answerCbQuery('🚀 Turbo ON: 19 Posts / 1 Min!');
+  await ctx.answerCbQuery('Set to 10 Posts / 5 Mins');
   return renderAdminPanel(ctx, true);
 });
 
 bot.action('admin_clean_posted', async (ctx) => {
   if (!isAdmin(ctx.from?.id)) return ctx.answerCbQuery('Admins only');
   await cleanupOldPostedMovies();
-  await ctx.answerCbQuery('Cleaned old posted movies!');
+  await ctx.answerCbQuery('Cleaned!');
   return renderAdminPanel(ctx, true);
 });
 
@@ -590,28 +526,27 @@ bot.action('admin_run_now', async (ctx) => {
   if (!isAdmin(ctx.from?.id)) return ctx.answerCbQuery('Admins only');
   if (resetWorkerLockFn) resetWorkerLockFn();
   await AppSettings.updateOne({ key: 'global' }, { $set: { autoPublishEnabled: true } }, { upsert: true });
-  await ctx.answerCbQuery('Unlocked & Running batch now...');
-  if (triggerWorkerNow) triggerWorkerNow().catch((e) => console.error(e));
-  return ctx.reply('⚡ Worker unlocked and triggered immediate 19-Movie Publishing batch!');
+  await ctx.answerCbQuery('Triggered!');
+  if (triggerWorkerNow) {
+    triggerWorkerNow().catch((e) => console.error(e));
+    return ctx.reply('⚡ Immediate batch started!');
+  }
+  return ctx.reply('ℹ️ Worker runs via GitHub Actions schedule (or trigger manually in GitHub Actions tab).');
 });
 
 bot.action('admin_menu_time', async (ctx) => {
   if (!isAdmin(ctx.from?.id)) return ctx.answerCbQuery('Admins only');
   await ctx.answerCbQuery();
-  return ctx.editMessageText('⏱️ <b>SELECT AUTO-POSTING SPEED & INTERVAL:</b>', {
+  return ctx.editMessageText('⏱️ <b>SELECT AUTO-POSTING SPEED:</b>', {
     parse_mode: 'HTML',
     ...Markup.inlineKeyboard([
       [
-        Markup.button.callback('🚀 19 Posts / 1 Min', 'admin_speed_turbo'),
-        Markup.button.callback('⚡ 10 Posts / 1 Min', 'admin_set_batch_10')
+        Markup.button.callback('⚡ 10 Posts / 5m', 'admin_speed_eco'),
+        Markup.button.callback('🚀 15 Posts / 5m', 'admin_set_batch_15')
       ],
       [
-        Markup.button.callback('1 Post / 1 Min', 'admin_set_time_1'),
-        Markup.button.callback('1 Post / 5 Mins', 'admin_set_time_5')
-      ],
-      [
-        Markup.button.callback('1 Post / 15 Mins', 'admin_set_time_15'),
-        Markup.button.callback('1 Post / 20 Mins', 'admin_set_time_20')
+        Markup.button.callback('1 Post / 5 Mins', 'admin_set_time_5'),
+        Markup.button.callback('1 Post / 15 Mins', 'admin_set_time_15')
       ],
       [Markup.button.callback('✏️ Custom Minutes', 'admin_prompt_time')],
       [Markup.button.callback('⬅️ Back', 'admin_home')]
@@ -619,39 +554,28 @@ bot.action('admin_menu_time', async (ctx) => {
   });
 });
 
-bot.action('admin_set_batch_10', async (ctx) => {
+bot.action('admin_set_batch_15', async (ctx) => {
   if (!isAdmin(ctx.from?.id)) return ctx.answerCbQuery('Admins only');
   await AppSettings.updateOne(
     { key: 'global' },
-    { $set: { publishIntervalMinutes: 1, postsPerBatch: 10, autoPublishEnabled: true } },
+    { $set: { publishIntervalMinutes: 5, postsPerBatch: 15, autoPublishEnabled: true } },
     { upsert: true }
   );
-  await ctx.answerCbQuery('Set to 10 Posts / 1 Min');
+  await ctx.answerCbQuery('Set to 15 Posts / 5 Mins');
   return renderAdminPanel(ctx, true);
 });
 
 bot.action(/^admin_set_time_(\d+)$/, async (ctx) => {
   if (!isAdmin(ctx.from?.id)) return ctx.answerCbQuery('Admins only');
   const mins = Math.max(1, Number(ctx.match[1]));
-  await AppSettings.updateOne(
-    { key: 'global' },
-    { $set: { publishIntervalMinutes: mins, postsPerBatch: 1 } },
-    { upsert: true }
-  );
-  await ctx.answerCbQuery(`Set to 1 Post every ${mins} mins`);
+  await AppSettings.updateOne({ key: 'global' }, { $set: { publishIntervalMinutes: mins, postsPerBatch: 1 } }, { upsert: true });
+  await ctx.answerCbQuery(`Set to 1 Post / ${mins}m`);
   return renderAdminPanel(ctx, true);
-});
-
-bot.action('admin_prompt_time', async (ctx) => {
-  if (!isAdmin(ctx.from?.id)) return ctx.answerCbQuery('Admins only');
-  adminSession.set(ctx.from.id, { step: 'SET_TIME' });
-  await ctx.answerCbQuery();
-  return ctx.reply('⏱️ Send custom interval in minutes (e.g. 5), or /cancel:');
 });
 
 bot.action('admin_menu_links', async (ctx) => {
   if (!isAdmin(ctx.from?.id)) return ctx.answerCbQuery('Admins only');
-  const s: any = await AppSettings.findOne({ key: 'global' });
+  const s: any = await AppSettings.findOne({ key: 'global' }).lean();
   await ctx.answerCbQuery();
   return ctx.editMessageText(
     `🔗 <b>CHANNEL LINKS</b>\n\n1️⃣ C1: ${escapeHtml(s?.channel01Url || '')}\n2️⃣ C2: ${escapeHtml(s?.channel02Url || '')}\n💎 Prem: ${escapeHtml(s?.premiumUrl || '')}\n🔞 18+: ${escapeHtml(s?.adultContentUrl || '')}`,
@@ -675,6 +599,7 @@ const promptStep = (actionName: string, stepName: string, msg: string) => {
   });
 };
 
+promptStep('admin_prompt_time', 'SET_TIME', '⏱️ Send custom interval in minutes (e.g. 5), or /cancel:');
 promptStep('admin_link_c1', 'LINK_C1', '🔗 Send new URL for CHANNEL 01, or /cancel:');
 promptStep('admin_link_c2', 'LINK_C2', '🔗 Send new URL for CHANNEL 02, or /cancel:');
 promptStep('admin_link_prem', 'LINK_PREM', '💎 Send new URL for PREMIUM CONTENT, or /cancel:');
@@ -682,12 +607,12 @@ promptStep('admin_link_adult', 'LINK_ADULT', '🔞 Send new URL for 18+ CONTENT,
 promptStep('admin_prompt_rating', 'SET_RATING', '⭐ Send new "Our Rating" (e.g. 4.8/5), or /cancel:');
 promptStep('admin_prompt_ban', 'BAN_USER', '🚫 Send User Telegram ID to BAN, or /cancel:');
 promptStep('admin_prompt_unban', 'UNBAN_USER', '✅ Send User Telegram ID to UNBAN, or /cancel:');
-promptStep('admin_prompt_broadcast', 'BROADCAST', '📢 Send/forward any message to BROADCAST to all users, or /cancel:');
-promptStep('admin_prompt_broadcast_pin', 'BROADCAST_PIN', '📌 Send/forward any message to BROADCAST & PIN for all users, or /cancel:');
+promptStep('admin_prompt_broadcast', 'BROADCAST', '📢 Send/forward message to BROADCAST, or /cancel:');
+promptStep('admin_prompt_broadcast_pin', 'BROADCAST_PIN', '📌 Send/forward message to BROADCAST & PIN, or /cancel:');
 
 bot.action('admin_clean_queue', async (ctx) => {
   if (!isAdmin(ctx.from?.id)) return ctx.answerCbQuery('Admins only');
-  const s: any = await AppSettings.findOne({ key: 'global' });
+  const s: any = await AppSettings.findOne({ key: 'global' }).lean();
   const allowed = String(s?.allowedLanguages || 'hi,en,ta,te,ml,kn').split(',').map((x: string) => x.trim().toLowerCase()).filter(Boolean);
   const res = await MediaItem.deleteMany({ isPublished: false, $or: [{ originalLanguage: { $nin: allowed } }, { posterPath: '' }] });
   await MonthJob.deleteMany({ status: { $ne: 'COMPLETED' } });
@@ -707,16 +632,16 @@ bot.command('status', async (ctx) => {
     MediaItem.countDocuments({ isPublished: false }),
     PostedHistory.countDocuments(),
     MediaItem.countDocuments({ isPublished: false, userRequested: true }),
-    MonthJob.findOne({ status: { $ne: 'COMPLETED' } }).sort({ month: -1 }),
-    AppSettings.findOne({ key: 'global' })
+    MonthJob.findOne({ status: { $ne: 'COMPLETED' } }).sort({ month: -1 }).lean(),
+    AppSettings.findOne({ key: 'global' }).lean()
   ]);
   return ctx.replyWithHTML(
-    `📊 <b>Status:</b>\n🌱 Seeding: ${s?.autoSeedingEnabled ? 'ON' : 'OFF'}\n📤 Publish: ${s?.autoPublishEnabled ? 'ON' : 'OFF'} (${s?.postsPerBatch || 19} Posts / ${s?.publishIntervalMinutes || 1}m)\n📅 Month: ${job ? `${job.month} P${job.currentPage}/${job.totalPages}` : 'Idle'}\n✅ Posted & Cleaned: ${postedHistoryCount} | ⏳ Queue: ${pend} (🔥 Priority: ${prio})`
+    `📊 <b>Status:</b>\n🌱 Seeding: ${s?.autoSeedingEnabled ? 'ON' : 'OFF'}\n📤 Publish: ${s?.autoPublishEnabled ? 'ON' : 'OFF'} (${s?.postsPerBatch || 10} Posts / ${s?.publishIntervalMinutes || 5}m)\n📅 Month: ${job ? `${job.month} P${job.currentPage}/${job.totalPages}` : 'Idle'}\n✅ Posted: ${postedHistoryCount} | ⏳ Queue: ${pend} (🔥 Priority: ${prio})`
   );
 });
 
 bot.command('latest', async (ctx) => {
-  const items = await MediaItem.find().sort({ releaseDate: -1 }).limit(10);
+  const items = await MediaItem.find().select('_id title releaseDate').sort({ releaseDate: -1 }).limit(10).lean();
   if (items.length === 0) return ctx.reply('No titles yet.');
   const buttons: any[] = items.map((item: any, i: number) => [
     Markup.button.callback(`${i + 1}. 🎬 ${item.title} (${item.releaseDate ? String(item.releaseDate).substring(0, 4) : 'N/A'})`, `view_${item._id}`)
@@ -745,7 +670,7 @@ bot.action(/^view_(.+)$/, async (ctx) => {
   try {
     let item: any = await MediaItem.findById(ctx.match[1]);
     if (!item) return ctx.answerCbQuery('Not found or already published');
-    await ctx.answerCbQuery('Loading details & queue timer...');
+    await ctx.answerCbQuery('Loading details...');
     item = await enrichItemFull(item);
     return sendMediaCardToChat(ctx, item);
   } catch (_e) {
@@ -754,14 +679,15 @@ bot.action(/^view_(.+)$/, async (ctx) => {
 });
 
 const saveTMDBHitsToDB = async (hits: any[]) => {
-  for (const hit of hits.slice(0, 5)) {
+  const topHits = hits.slice(0, 5);
+  for (const hit of topHits) {
     const mediaType: 'movie' | 'tv' = hit.media_type === 'tv' ? 'tv' : 'movie';
     const alreadyDone = await PostedHistory.findOne({ tmdbId: hit.id, mediaType }).lean();
     if (alreadyDone) continue;
 
     const d = await fetchTMDBDetails(hit.id, mediaType);
     const availLangs = extractAvailableLanguages(d, hit.original_language);
-    const doc: any = await MediaItem.findOneAndUpdate(
+    await MediaItem.findOneAndUpdate(
       { tmdbId: hit.id, mediaType },
       {
         $set: {
@@ -780,29 +706,22 @@ const saveTMDBHitsToDB = async (hits: any[]) => {
           imdbId: d?.external_ids?.imdb_id || d?.imdb_id || ''
         }
       },
-      { upsert: true, new: true }
+      { upsert: true }
     );
-    if (doc && (!doc.overview || !doc.runtime)) {
-      await enrichWithAI(doc);
-      await doc.save();
-    }
   }
 };
 
 const handleTitleSearch = async (ctx: any, rawQuery: string) => {
   const cleanQuery = rawQuery.replace(/^\d+\.\s*/, '').replace(/🎬/g, '').replace(/\(\d{4}\)\s*$/, '').trim();
   if (!cleanQuery || cleanQuery.length < 2) {
-    return ctx.replyWithHTML(
-      '⚠️ <b>Invalid Search Format!</b>\n' +
-        '✅ <b>Correct Format:</b> <code>Movie Name</code> or <code>Movie Name Year</code> (e.g., <code>Stay Good</code>)'
-    );
+    return ctx.replyWithHTML('⚠️ <b>Invalid Search!</b> Format: <code>Movie Name</code>');
   }
 
   const googleUrl = `https://www.google.com/search?q=${encodeURIComponent(cleanQuery + ' movie')}`;
 
   try {
     const escaped = cleanQuery.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-    let results = await MediaItem.find({ title: { $regex: escaped, $options: 'i' } })
+    let results: any[] = await MediaItem.find({ title: { $regex: escaped, $options: 'i' } })
       .sort({ voteCount: -1, releaseDate: -1 })
       .limit(8);
 
@@ -814,17 +733,9 @@ const handleTitleSearch = async (ctx: any, rawQuery: string) => {
 
       if (liveHits.length === 0) {
         usedFuzzyOrSpellingFix = true;
-        const words = cleanQuery.split(/\s+/).filter((w) => w.length >= 3);
-        for (const w of words.sort((a, b) => b.length - a.length)) {
-          liveHits = await searchTMDBMulti(w);
-          if (liveHits.length > 0) break;
-        }
-
-        if (liveHits.length === 0) {
-          suggestedTitle = await suggestCorrectTitleWithAI(cleanQuery);
-          if (suggestedTitle && suggestedTitle.toLowerCase() !== cleanQuery.toLowerCase()) {
-            liveHits = await searchTMDBMulti(suggestedTitle);
-          }
+        suggestedTitle = await suggestCorrectTitleWithAI(cleanQuery);
+        if (suggestedTitle && suggestedTitle.toLowerCase() !== cleanQuery.toLowerCase()) {
+          liveHits = await searchTMDBMulti(suggestedTitle);
         }
       }
 
@@ -838,7 +749,13 @@ const handleTitleSearch = async (ctx: any, rawQuery: string) => {
 
       if (results.length === 0) {
         usedFuzzyOrSpellingFix = true;
-        const candidates = await MediaItem.find().sort({ updatedAt: -1 }).limit(400);
+        // Projection + lean saves ~95% RAM and Mongo bandwidth
+        const candidates = await MediaItem.find()
+          .select('_id title releaseDate isPublished')
+          .sort({ updatedAt: -1 })
+          .limit(300)
+          .lean();
+
         const scored = candidates
           .map((item: any) => ({
             item,
@@ -857,41 +774,30 @@ const handleTitleSearch = async (ctx: any, rawQuery: string) => {
 
     if (results.length === 0) {
       return ctx.replyWithHTML(
-        `❌ <b>No exact match found for "${escapeHtml(cleanQuery)}"</b>\n\n` +
-          `⚠️ <b>Spelling & Search Guide:</b>\n` +
-          `• Please make sure the movie/series spelling is accurate.\n` +
-          `• <b>Search Format:</b> <code>Movie Name</code> (e.g., <code>Stay Good</code> or <code>Kingsman</code>)\n\n` +
-          `👇 <i>Click the button below to check the exact spelling on Google, then copy & paste the correct title here:</i>`,
-        Markup.inlineKeyboard([
-          [Markup.button.url(`🔎 Check "${cleanQuery}" on Google`, googleUrl)]
-        ])
+        `❌ <b>No match found for "${escapeHtml(cleanQuery)}"</b>\n\n` +
+          `👇 <i>Check exact spelling on Google and paste it back here:</i>`,
+        Markup.inlineKeyboard([[Markup.button.url(`🔎 Check "${cleanQuery}" on Google`, googleUrl)]])
       );
     }
 
     if (results.length === 1 && !usedFuzzyOrSpellingFix) {
-      let item: any = await enrichItemFull(results[0]);
-      return sendMediaCardToChat(ctx, item);
+      const fullItem = await MediaItem.findById(results[0]._id);
+      if (fullItem) {
+        await enrichItemFull(fullItem);
+        return sendMediaCardToChat(ctx, fullItem);
+      }
     }
 
     const buttons: any[] = results.map((item: any) => {
       const year = item.releaseDate ? String(item.releaseDate).substring(0, 4) : 'N/A';
       const statusIcon = item.isPublished ? '✅' : '⏳';
-      return [
-        Markup.button.callback(
-          `${statusIcon} 🎬 ${item.title} (${year})`,
-          `view_${item._id}`
-        )
-      ];
+      return [Markup.button.callback(`${statusIcon} 🎬 ${item.title} (${year})`, `view_${item._id}`)];
     });
-
     buttons.push([Markup.button.url(`🔎 Not here? Check "${cleanQuery}" on Google`, googleUrl)]);
 
     const headerText = usedFuzzyOrSpellingFix
-      ? `⚠️ <b>No exact match for "${escapeHtml(cleanQuery)}". Showing closest matches:</b>\n` +
-        `💡 <i>Tip: Use exact spelling (Format: <code>Movie Name</code>). If your movie isn't listed below, click the Google button to copy the exact title!</i>\n\n` +
-        `👇 <b>Select a movie below to view details & auto-post timer:</b>`
-      : `🔎 <b>Search Results for "${escapeHtml(cleanQuery)}":</b>\n` +
-        `<i>(✅ = On Channel | ⏳ = Click to Auto-Queue with Timer)</i>`;
+      ? `⚠️ <b>Closest matches for "${escapeHtml(cleanQuery)}":</b>`
+      : `🔎 <b>Search Results for "${escapeHtml(cleanQuery)}":</b>`;
 
     return ctx.replyWithHTML(headerText, Markup.inlineKeyboard(buttons));
   } catch (_e) {
@@ -914,10 +820,10 @@ bot.on('message', async (ctx: any) => {
 
     if (step === 'BROADCAST' || step === 'BROADCAST_PIN') {
       const pin = step === 'BROADCAST_PIN';
-      const users = await BotUser.find({ isBanned: { $ne: true } });
+      const userList = await BotUser.find({ isBanned: { $ne: true } }).select('telegramId').lean();
       let sent = 0, pinned = 0, failed = 0;
-      await ctx.reply(`⏳ Broadcasting to ${users.length} users...`);
-      for (const u of users) {
+      await ctx.reply(`⏳ Broadcasting to ${userList.length} users...`);
+      for (const u of userList) {
         try {
           const cp: any = await ctx.telegram.copyMessage(u.telegramId, ctx.chat.id, ctx.message.message_id);
           sent++;
@@ -941,7 +847,7 @@ bot.on('message', async (ctx: any) => {
     else if (step === 'LINK_PREM') await AppSettings.updateOne({ key: 'global' }, { $set: { premiumUrl: t } }, { upsert: true });
     else if (step === 'LINK_ADULT') await AppSettings.updateOne({ key: 'global' }, { $set: { adultContentUrl: t } }, { upsert: true });
     else if (step === 'SET_RATING') await AppSettings.updateOne({ key: 'global' }, { $set: { ourRating: t } }, { upsert: true });
-    else if (step === 'SET_TIME') await AppSettings.updateOne({ key: 'global' }, { $set: { publishIntervalMinutes: Math.max(1, Number(t) || 1) } }, { upsert: true });
+    else if (step === 'SET_TIME') await AppSettings.updateOne({ key: 'global' }, { $set: { publishIntervalMinutes: Math.max(1, Number(t) || 5) } }, { upsert: true });
     else if (step === 'BAN_USER' && Number(t)) await BotUser.findOneAndUpdate({ telegramId: Number(t) }, { $set: { isBanned: true } }, { upsert: true });
     else if (step === 'UNBAN_USER' && Number(t)) await BotUser.findOneAndUpdate({ telegramId: Number(t) }, { $set: { isBanned: false } }, { upsert: true });
 
@@ -954,88 +860,41 @@ bot.on('message', async (ctx: any) => {
   return handleTitleSearch(ctx, text);
 });
 
-// --- APPLICATION STARTUP LOGIC (BULLETPROOF FOR RENDER) ---
-
 bot.catch((err: any, ctx: any) => {
-  console.warn(`⚠️ Handled Telegram Error (${ctx?.updateType || 'update'}):`, err?.message || err);
+  console.warn(`⚠️ Telegram Error (${ctx?.updateType || 'update'}):`, err?.message || err);
 });
 
-process.on('unhandledRejection', (reason: any) => {
-  console.warn('⚠️ Unhandled Rejection ignored to keep bot alive:', reason?.message || reason);
-});
-
-process.on('uncaughtException', (err: any) => {
-  console.warn('⚠️ Uncaught Exception ignored to keep bot alive:', err?.message || err);
-});
-
-const launchBotSafely = async (retryCount = 0): Promise<void> => {
-  try {
-    await bot.launch({ dropPendingUpdates: true });
-    console.log('✅ Telegram Bot Launched successfully.');
-  } catch (err: any) {
-    const msg = String(err?.message || err);
-    if (msg.includes('409') && retryCount < 10) {
-      console.warn(`⏳ Old Render instance still stopping (409 Conflict). Retrying in 5s... (Attempt ${retryCount + 1}/10)`);
-      setTimeout(() => launchBotSafely(retryCount + 1), 5000);
-    } else {
-      console.error('❌ Bot launch error:', msg);
-      setTimeout(() => launchBotSafely(retryCount + 1), 10000);
-    }
-  }
+// Exported webhook handler for Vercel Serverless (api/webhook.ts)
+export const handleWebhookUpdate = async (body: any) => {
+  await ensureDbConnected();
+  await bot.handleUpdate(body);
 };
 
+// Only run HTTP server + polling when started directly (`node dist/index.js`)
 const startApp = async () => {
-  try {
-    const PORT = Number(process.env.PORT || 10000);
-    http.createServer((_req, res) => {
-      res.writeHead(200, { 'Content-Type': 'text/plain' });
-      res.end('Movie Bot is Alive and Running (19 Posts/Min Turbo Mode)!');
-    }).listen(PORT, '0.0.0.0', () => {
-      console.log(`✅ Render Web Service listening on port ${PORT}`);
-    });
+  const PORT = Number(process.env.PORT || 10000);
+  http.createServer((_req, res) => {
+    res.writeHead(200, { 'Content-Type': 'text/plain' });
+    res.end('Movie Bot Alive!');
+  }).listen(PORT, '0.0.0.0', () => console.log(`✅ Listening on ${PORT}`));
 
-    const mongoUri = (process.env.MONGODB_URI || '').trim();
-    if (!mongoUri) {
-      console.error('❌ MONGODB_URI is missing in Render Environment!');
-    } else {
-      await mongoose.connect(mongoUri);
-      console.log('✅ Connected to MongoDB successfully.');
+  await ensureDbConnected();
+  // $setOnInsert: Admin Panel settings will NOT be overwritten on restart
+  await AppSettings.updateOne(
+    { key: 'global' },
+    { $setOnInsert: { autoPublishEnabled: true, autoSeedingEnabled: true, publishIntervalMinutes: 5, postsPerBatch: 10 } },
+    { upsert: true }
+  );
 
-      // ऑटोमैटिक 1 मिनट में 19 पोस्टिंग (Turbo Mode) ON करें
-      await AppSettings.updateOne(
-        { key: 'global' },
-        {
-          $set: {
-            autoPublishEnabled: true,
-            autoSeedingEnabled: true,
-            publishIntervalMinutes: 1,
-            postsPerBatch: 19
-          }
-        },
-        { upsert: true }
-      );
-      console.log('🚀 Turbo Mode Activated: 19 Posts per 1 Minute + Auto-Delete Old Posted Movies!');
-    }
-
+  if (process.env.DISABLE_INTERNAL_CRON !== 'true') {
     startCronJobs();
-    console.log('✅ Background Workers (Cron) Started.');
-
-    setTimeout(() => {
-      launchBotSafely();
-    }, 3000);
-  } catch (error) {
-    console.error('❌ Startup Error:', error);
   }
+  await bot.launch({ dropPendingUpdates: true });
+  console.log('✅ Bot polling started.');
 };
 
-startApp();
-
-process.once('SIGINT', () => {
-  try { bot.stop('SIGINT'); } catch (_e) {}
-  process.exit(0);
-});
-process.once('SIGTERM', () => {
-  try { bot.stop('SIGTERM'); } catch (_e) {}
-  process.exit(0);
-});
-// === END OF FILE ===
+if (require.main === module) {
+  startApp().catch((err) => console.error('❌ Startup Error:', err));
+  process.once('SIGINT', () => { try { bot.stop('SIGINT'); } catch (_e) {} process.exit(0); });
+  process.once('SIGTERM', () => { try { bot.stop('SIGTERM'); } catch (_e) {} process.exit(0); });
+}
