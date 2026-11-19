@@ -395,7 +395,7 @@ const renderAdminPanel = async (ctx: any, edit = false) => {
       Markup.button.callback(s.autoSeedingEnabled ? '⏸️ Stop Seeding' : '▶️ Start Seeding', 'admin_toggle_seed')
     ],
     [
-      Markup.button.callback('🚀 10 Posts / 5m', 'admin_speed_eco'),
+      Markup.button.callback('🚀 15 Posts / 1m', 'admin_preset_15_1'),
       Markup.button.callback(`⏱️ Speed (${batch}/${mins}m)`, 'admin_menu_time')
     ],
     [
@@ -535,54 +535,69 @@ bot.action('admin_toggle_ai', async (ctx) => {
 bot.action('admin_run_now', async (ctx) => {
   if (!isAdmin(ctx.from?.id)) return ctx.answerCbQuery('Admins only');
   if (resetWorkerLockFn) resetWorkerLockFn();
-  await AppSettings.updateOne({ key: 'global' }, { $set: { autoPublishEnabled: true } }, { upsert: true });
-  await ctx.answerCbQuery('Done');
+  await AppSettings.updateOne(
+    { key: 'global' },
+    { $set: { autoPublishEnabled: true, lastPublishAt: new Date(0) } },
+    { upsert: true }
+  );
+  await ctx.answerCbQuery('Timer reset!');
   if (triggerWorkerNow) {
     triggerWorkerNow().catch((e) => console.error(e));
     return ctx.reply('⚡ Immediate batch started!');
   }
-  return ctx.reply('ℹ️ Auto-poster runs automatically every 5 mins via GitHub Actions (or run manually in GitHub Actions tab).');
+  return ctx.reply('⚡ Timer reset! Next GitHub Actions cycle me turant post ho jayega.');
 });
 
 bot.action('admin_menu_time', async (ctx) => {
   if (!isAdmin(ctx.from?.id)) return ctx.answerCbQuery('Admins only');
+  const s: any = await AppSettings.findOne({ key: 'global' }).lean();
+  const mins = s?.publishIntervalMinutes || 1;
+  const batch = s?.postsPerBatch || 15;
   await ctx.answerCbQuery();
-  return ctx.editMessageText('⏱️ <b>SELECT AUTO-POSTING SPEED:</b>', {
-    parse_mode: 'HTML',
-    ...Markup.inlineKeyboard([
-      [
-        Markup.button.callback('⚡ 10 Posts / 5m', 'admin_speed_eco'),
-        Markup.button.callback('🚀 15 Posts / 5m', 'admin_set_batch_15')
-      ],
-      [
-        Markup.button.callback('1 Post / 5 Mins', 'admin_set_time_5'),
-        Markup.button.callback('1 Post / 15 Mins', 'admin_set_time_15')
-      ],
-      [Markup.button.callback('✏️ Custom Minutes', 'admin_prompt_time')],
-      [Markup.button.callback('⬅️ Back', 'admin_home')]
-    ])
-  });
+  return ctx.editMessageText(
+    `⏱️ <b>AUTO-POST SPEED & TIMING</b>\n\n` +
+      `Current: <b>${batch} Posts</b> every <b>${mins} Min(s)</b>`,
+    {
+      parse_mode: 'HTML',
+      ...Markup.inlineKeyboard([
+        [
+          Markup.button.callback('🚀 15 Posts / 1m', 'admin_preset_15_1'),
+          Markup.button.callback('⚡ 10 Posts / 1m', 'admin_preset_10_1')
+        ],
+        [
+          Markup.button.callback('5 Posts / 1m', 'admin_preset_5_1'),
+          Markup.button.callback('10 Posts / 5m', 'admin_preset_10_5')
+        ],
+        [
+          Markup.button.callback('1 Post / 5m', 'admin_preset_1_5'),
+          Markup.button.callback('1 Post / 15m', 'admin_preset_1_15')
+        ],
+        [
+          Markup.button.callback('1 Post / 30m', 'admin_preset_1_30'),
+          Markup.button.callback('1 Post / 60m', 'admin_preset_1_60')
+        ],
+        [
+          Markup.button.callback('✏️ Custom Minutes', 'admin_prompt_time'),
+          Markup.button.callback('🔢 Custom Batch (1-20)', 'admin_prompt_batch')
+        ],
+        [Markup.button.callback('⬅️ Back', 'admin_home')]
+      ])
+    }
+  );
 });
 
-bot.action('admin_set_batch_15', async (ctx) => {
+bot.action(/^admin_preset_(\d+)_(\d+)$/, async (ctx) => {
   if (!isAdmin(ctx.from?.id)) return ctx.answerCbQuery('Admins only');
+  const batch = Math.min(20, Math.max(1, Number(ctx.match[1])));
+  const mins = Math.max(1, Number(ctx.match[2]));
   await AppSettings.updateOne(
     { key: 'global' },
-    { $set: { publishIntervalMinutes: 5, postsPerBatch: 15, autoPublishEnabled: true } },
+    { $set: { postsPerBatch: batch, publishIntervalMinutes: mins, autoPublishEnabled: true } },
     { upsert: true }
   );
-  await ctx.answerCbQuery('Set to 15 Posts / 5 Mins');
+  await ctx.answerCbQuery(`Set: ${batch} Posts / ${mins}m`);
   return renderAdminPanel(ctx, true);
 });
-
-bot.action(/^admin_set_time_(\d+)$/, async (ctx) => {
-  if (!isAdmin(ctx.from?.id)) return ctx.answerCbQuery('Admins only');
-  const mins = Math.max(1, Number(ctx.match[1]));
-  await AppSettings.updateOne({ key: 'global' }, { $set: { publishIntervalMinutes: mins, postsPerBatch: 1 } }, { upsert: true });
-  await ctx.answerCbQuery(`Set to 1 Post / ${mins}m`);
-  return renderAdminPanel(ctx, true);
-});
-
 bot.action('admin_menu_links', async (ctx) => {
   if (!isAdmin(ctx.from?.id)) return ctx.answerCbQuery('Admins only');
   const s: any = await AppSettings.findOne({ key: 'global' }).lean();
