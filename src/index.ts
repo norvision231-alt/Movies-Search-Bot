@@ -355,13 +355,13 @@ bot.use(async (ctx, next) => {
 const renderAdminPanel = async (ctx: any, edit = false) => {
   let s: any = await AppSettings.findOne({ key: 'global' });
   if (!s) s = await AppSettings.create({ key: 'global' });
-  const [totalInQueue, postedHistoryCount, priorityQueue, totalUsers, bannedUsers, activeJob] = await Promise.all([
+  const [totalInQueue, postedHistoryCount, priorityQueue, totalUsers, bannedUsers, activeJob]: any = await Promise.all([
     MediaItem.countDocuments({ isPublished: false }),
     PostedHistory.countDocuments(),
     MediaItem.countDocuments({ isPublished: false, userRequested: true }),
     BotUser.countDocuments(),
     BotUser.countDocuments({ isBanned: true }),
-    MonthJob.findOne({ status: { $ne: 'COMPLETED' } }).sort({ month: -1 }).lean()
+    MonthJob.findOne({ status: { $ne: 'COMPLETED' } }).sort({ month: -1 }).lean<any>()
   ]);
   const mins = s.publishIntervalMinutes || 5;
   const batch = s.postsPerBatch || 10;
@@ -820,7 +820,7 @@ bot.on('message', async (ctx: any) => {
 
     if (step === 'BROADCAST' || step === 'BROADCAST_PIN') {
       const pin = step === 'BROADCAST_PIN';
-      const userList = await BotUser.find({ isBanned: { $ne: true } }).select('telegramId').lean();
+    const userList: any[] = await BotUser.find({ isBanned: { $ne: true } }).select('telegramId').lean();
       let sent = 0, pinned = 0, failed = 0;
       await ctx.reply(`⏳ Broadcasting to ${userList.length} users...`);
       for (const u of userList) {
