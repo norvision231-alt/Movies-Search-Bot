@@ -2,6 +2,12 @@ import axios from 'axios';
 
 const TMDB_BASE_URL = 'https://api.themoviedb.org/3';
 
+const tmdbHttp = axios.create({
+  baseURL: TMDB_BASE_URL,
+  timeout: 12000,
+  headers: { accept: 'application/json' }
+});
+
 const GENRE_MAP: Record<number, string> = {
   28: 'Action', 12: 'Adventure', 16: 'Animation', 35: 'Comedy', 80: 'Crime',
   99: 'Documentary', 18: 'Drama', 10751: 'Family', 14: 'Fantasy', 36: 'History',
@@ -18,9 +24,8 @@ export const LANG_NAME_MAP: Record<string, string> = {
   ru: 'Russian', pt: 'Portuguese', tr: 'Turkish', th: 'Thai', id: 'Indonesian', ar: 'Arabic'
 };
 
-export const mapGenreIds = (ids: number[] = []): string[] => {
-  return ids.map((id: number) => GENRE_MAP[id]).filter(Boolean);
-};
+export const mapGenreIds = (ids: number[] = []): string[] =>
+  ids.map((id: number) => GENRE_MAP[id]).filter(Boolean);
 
 export const getMonthDateRange = (monthStr: string): { startDate: string; endDate: string } => {
   const [yearStr, monStr] = monthStr.split('-');
@@ -47,7 +52,7 @@ export const getPreviousMonth = (monthStr: string): string => {
 const getAuthConfig = (extraParams: Record<string, any> = {}) => {
   const token = (process.env.TMDB_API_TOKEN || process.env.TMDB_ACCESS_TOKEN || '').trim();
   const isBearer = token.startsWith('eyJ');
-  const headers: Record<string, string> = { accept: 'application/json' };
+  const headers: Record<string, string> = {};
   const params: Record<string, any> = { ...extraParams, language: 'en-US' };
 
   if (isBearer) {
@@ -70,18 +75,6 @@ export const extractAvailableLanguages = (details: any, originalLangCode: string
       const code = String(l.iso_639_1 || '').toLowerCase();
       const name = LANG_NAME_MAP[code] || l.english_name || l.name;
       if (name) langSet.add(name);
-    }
-  }
-
-  // Check official TMDB translations (prioritizing Indian & Major Global languages)
-  const priorityCodes = ['hi', 'en', 'ta', 'te', 'ml', 'kn', 'bn', 'mr', 'pa', 'es', 'fr', 'ko', 'ja'];
-  const transList = details?.translations?.translations;
-  if (Array.isArray(transList)) {
-    for (const t of transList) {
-      const code = String(t.iso_639_1 || '').toLowerCase();
-      if (priorityCodes.includes(code) && LANG_NAME_MAP[code]) {
-        langSet.add(LANG_NAME_MAP[code]);
-      }
     }
   }
 
@@ -110,11 +103,7 @@ export const fetchTMDBDiscover = async (
   });
 
   try {
-    const response = await axios.get(`${TMDB_BASE_URL}/discover/${mediaType}`, {
-      headers,
-      params,
-      timeout: 15000
-    });
+    const response = await tmdbHttp.get(`/discover/${mediaType}`, { headers, params });
     return response.data;
   } catch (error: any) {
     console.error('TMDB Discover Error:', error?.response?.status || error?.message);
@@ -122,20 +111,17 @@ export const fetchTMDBDiscover = async (
   }
 };
 
+// Removed heavy "translations" append to save ~85% bandwidth
 export const fetchTMDBDetails = async (
   tmdbId: number,
   mediaType: 'movie' | 'tv' = 'movie'
 ): Promise<any> => {
   const { headers, params } = getAuthConfig({
-    append_to_response: 'external_ids,translations'
+    append_to_response: 'external_ids'
   });
 
   try {
-    const response = await axios.get(`${TMDB_BASE_URL}/${mediaType}/${tmdbId}`, {
-      headers,
-      params,
-      timeout: 12000
-    });
+    const response = await tmdbHttp.get(`/${mediaType}/${tmdbId}`, { headers, params });
     return response.data;
   } catch (error: any) {
     console.error(`TMDB Details Error (${mediaType}/${tmdbId}):`, error?.message);
@@ -151,11 +137,7 @@ export const searchTMDBMulti = async (query: string): Promise<any[]> => {
   });
 
   try {
-    const response = await axios.get(`${TMDB_BASE_URL}/search/multi`, {
-      headers,
-      params,
-      timeout: 12000
-    });
+    const response = await tmdbHttp.get('/search/multi', { headers, params });
     const results = response.data?.results || [];
     return results.filter((r: any) => r.media_type === 'movie' || r.media_type === 'tv');
   } catch (error: any) {
@@ -164,7 +146,6 @@ export const searchTMDBMulti = async (query: string): Promise<any[]> => {
   }
 };
 
-// AI Spell Correction for user typos (e.g., "Sta good" -> "Stay Good")
 export const suggestCorrectTitleWithAI = async (typoQuery: string): Promise<string> => {
   const deepseekKey = (process.env.DEEPSEEK_API_KEY || '').trim();
   const chatgptKey = (process.env.CHATGPT_API_KEY || process.env.OPENAI_API_KEY || '').trim();
@@ -193,11 +174,7 @@ export const suggestCorrectTitleWithAI = async (typoQuery: string): Promise<stri
     }
     return await callAI('https://api.openai.com/v1/chat/completions', chatgptKey, 'gpt-4o-mini');
   } catch (_e) {
-    try {
-      return await callAI('https://api.deepseek.com/v1/chat/completions', chatgptKey, 'deepseek-chat');
-    } catch (_e2) {
-      return '';
-    }
+    return '';
   }
 };
 
@@ -212,7 +189,7 @@ export const enrichWithAI = async (media: any): Promise<any> => {
   } titled "${media.title}" (${year}), original language "${media.originalLanguage || 'en'}".
 Return ONLY a valid JSON object:
 {
-  "overview": "A catchy 2-sentence English synopsis (max 220 chars)",
+  "overview": "A catchy 2-sentence English synopsis (max 200 chars)",
   "genres": ["Genre1", "Genre2"],
   "availableLanguages": ["English", "Hindi"],
   "runtime": 120,
@@ -231,9 +208,9 @@ Return ONLY a valid JSON object:
           { role: 'user', content: prompt }
         ],
         temperature: 0.3,
-        max_tokens: 300
+        max_tokens: 260
       },
-      { headers: { Authorization: `Bearer ${apiKey}` }, timeout: 15000 }
+      { headers: { Authorization: `Bearer ${apiKey}` }, timeout: 12000 }
     );
     const content = res.data?.choices?.[0]?.message?.content || '';
     const jsonMatch = content.match(/\{[\s\S]*\}/);
@@ -244,17 +221,21 @@ Return ONLY a valid JSON object:
   if (deepseekKey) {
     try {
       const baseUrl = (process.env.DEEPSEEK_BASE_URL || 'https://api.deepseek.com').replace(/\/$/, '');
-      aiData = await callProvider(`${baseUrl}/v1/chat/completions`, deepseekKey, process.env.DEEPSEEK_MODEL || 'deepseek-chat');
+      aiData = await callProvider(
+        `${baseUrl}/v1/chat/completions`,
+        deepseekKey,
+        process.env.DEEPSEEK_MODEL || 'deepseek-chat'
+      );
     } catch (_e) {}
   }
   if (!aiData && chatgptKey) {
     try {
-      aiData = await callProvider('https://api.openai.com/v1/chat/completions', chatgptKey, process.env.OPENAI_MODEL || 'gpt-4o-mini');
-    } catch (_e) {
-      try {
-        aiData = await callProvider('https://api.deepseek.com/v1/chat/completions', chatgptKey, 'deepseek-chat');
-      } catch (_e2) {}
-    }
+      aiData = await callProvider(
+        'https://api.openai.com/v1/chat/completions',
+        chatgptKey,
+        process.env.OPENAI_MODEL || 'gpt-4o-mini'
+      );
+    } catch (_e) {}
   }
 
   if (aiData) {
@@ -282,4 +263,3 @@ Return ONLY a valid JSON object:
   }
   return media;
 };
-// === END OF FILE ===
