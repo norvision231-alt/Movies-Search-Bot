@@ -25,10 +25,12 @@ export const ensureDbConnected = async (): Promise<void> => {
   const mongoUri = (process.env.MONGODB_URI || '').trim();
   if (!mongoUri) throw new Error('MONGODB_URI is missing');
   if (!dbConnectPromise) {
-    dbConnectPromise = mongoose.connect(mongoUri, {
-      maxPoolSize: 10,
-      serverSelectionTimeoutMS: 8000
-    });
+    dbConnectPromise = mongoose
+      .connect(mongoUri, { maxPoolSize: 10, serverSelectionTimeoutMS: 8000 })
+      .catch((err) => {
+        dbConnectPromise = null;
+        throw err;
+      });
   }
   await dbConnectPromise;
 };
@@ -43,7 +45,20 @@ export const registerWorkerReset = (fn: () => void) => {
   resetWorkerLockFn = fn;
 };
 
-const adminSession = new Map<number, { step: string }>();
+const setAdminStep = async (uid: number, step: string): Promise<void> => {
+  await BotUser.findOneAndUpdate({ telegramId: uid }, { $set: { adminStep: step } }, { upsert: true });
+};
+
+const clearAdminStep = async (uid?: number): Promise<void> => {
+  if (!uid) return;
+  await BotUser.updateOne({ telegramId: uid }, { $set: { adminStep: '' } });
+};
+
+const getAdminStep = async (uid?: number): Promise<string> => {
+  if (!uid) return '';
+  const u: any = await BotUser.findOne({ telegramId: uid }).select('adminStep').lean();
+  return String(u?.adminStep || '');
+};
 
 export const getTargetChannel = (): string =>
   (process.env.LOG_CHANNEL || process.env.TELEGRAM_MAIN_CHANNEL_ID || '').trim();
@@ -103,7 +118,6 @@ export const getDisplayLanguages = (media: any): string => {
   return String(media.originalLanguage || 'English').toUpperCase();
 };
 
-// Strictly stays within Telegram's 1024-char photo caption limit
 export const formatCaption = (media: any, settings: any, extraFooterHtml = ''): string => {
   const title = escapeHtml(media.title || 'Untitled');
   const year = media.releaseDate ? escapeHtml(String(media.releaseDate).substring(0, 4)) : 'N/A';
@@ -163,7 +177,6 @@ export const formatCaption = (media: any, settings: any, extraFooterHtml = ''): 
   const headerBlock = headerLines.join('\n');
   const footerBlock = footerLines.join('\n');
 
-  // Estimate visible text length (strip HTML tags for Telegram's 1024 visible-char limit)
   const visibleLen = (s: string) => s.replace(/<[^>]+>/g, '').length;
   const maxOverviewChars = Math.max(0, 1000 - visibleLen(headerBlock) - visibleLen(footerBlock) - 10);
 
@@ -183,7 +196,6 @@ export const formatCaption = (media: any, settings: any, extraFooterHtml = ''): 
   return `${headerBlock}\n${footerBlock}`;
 };
 
-// Zero-Waste Photo Sender: Telegram fetches image directly; buffer fallback ONLY on fetch failure
 export const sendPhotoSmart = async (
   chatId: string | number,
   posterPath: string,
@@ -195,13 +207,11 @@ export const sendPhotoSmart = async (
     const url500 = `https://image.tmdb.org/t/p/w500${normalizedPath}`;
     const url342 = `https://image.tmdb.org/t/p/w342${normalizedPath}`;
 
-    // Layer 1: Direct URL (0 server outbound bandwidth!)
     try {
       return await bot.telegram.sendPhoto(chatId, url500, { caption, parse_mode: 'HTML' });
     } catch (err1: any) {
       if (err1?.response?.parameters?.retry_after) throw err1;
       const desc = String(err1?.response?.description || err1?.message || '');
-      // Do NOT download image if caption or chat error caused the failure
       if (desc.includes('caption') || desc.includes('chat not found') || desc.includes('kicked')) {
         return await bot.telegram.sendMessage(chatId, caption, {
           parse_mode: 'HTML',
@@ -210,14 +220,12 @@ export const sendPhotoSmart = async (
       }
     }
 
-    // Layer 2: Lighter w342 direct URL (still 0 server bandwidth!)
     try {
       return await bot.telegram.sendPhoto(chatId, url342, { caption, parse_mode: 'HTML' });
     } catch (err2: any) {
       if (err2?.response?.parameters?.retry_after) throw err2;
     }
 
-    // Layer 3: Last-resort w342 binary buffer (much smaller than w500)
     try {
       const responseSmall = await axios.get(url342, {
         responseType: 'arraybuffer',
@@ -355,14 +363,16 @@ bot.use(async (ctx, next) => {
 const renderAdminPanel = async (ctx: any, edit = false) => {
   let s: any = await AppSettings.findOne({ key: 'global' });
   if (!s) s = await AppSettings.create({ key: 'global' });
+
   const [totalInQueue, postedHistoryCount, priorityQueue, totalUsers, bannedUsers, activeJob]: any = await Promise.all([
     MediaItem.countDocuments({ isPublished: false }),
     PostedHistory.countDocuments(),
     MediaItem.countDocuments({ isPublished: false, userRequested: true }),
     BotUser.countDocuments(),
     BotUser.countDocuments({ isBanned: true }),
-    MonthJob.findOne({ status: { $ne: 'COMPLETED' } }).sort({ month: -1 }).lean<any>()
+    MonthJob.findOne({ status: { $ne: 'COMPLETED' } }).sort({ month: -1 }).lean()
   ]);
+
   const mins = s.publishIntervalMinutes || 5;
   const batch = s.postsPerBatch || 10;
 
@@ -445,12 +455,12 @@ bot.help((ctx) => {
 
 bot.command('admin', async (ctx) => {
   if (!isAdmin(ctx.from?.id)) return ctx.reply(`⛔ Access Denied. Your ID: ${ctx.from?.id}`);
-  adminSession.delete(ctx.from.id);
+  await clearAdminStep(ctx.from?.id);
   return renderAdminPanel(ctx, false);
 });
 
 bot.command('cancel', async (ctx) => {
-  if (ctx.from) adminSession.delete(ctx.from.id);
+  await clearAdminStep(ctx.from?.id);
   return ctx.reply('✅ Action cancelled.');
 });
 
@@ -472,7 +482,7 @@ bot.command('unban', async (ctx) => {
 
 bot.action('admin_home', async (ctx) => {
   if (!isAdmin(ctx.from?.id)) return ctx.answerCbQuery('Admins only');
-  adminSession.delete(ctx.from.id);
+  await clearAdminStep(ctx.from?.id);
   await ctx.answerCbQuery('Refreshed');
   return renderAdminPanel(ctx, true);
 });
@@ -497,7 +507,7 @@ bot.action('admin_clean_posted', async (ctx) => {
 
 bot.action('admin_toggle_seed', async (ctx) => {
   if (!isAdmin(ctx.from?.id)) return ctx.answerCbQuery('Admins only');
-  const s: any = await AppSettings.findOne({ key: 'global' });
+  const s: any = await AppSettings.findOne({ key: 'global' }).lean();
   const next = !(s?.autoSeedingEnabled ?? true);
   await AppSettings.updateOne({ key: 'global' }, { $set: { autoSeedingEnabled: next } }, { upsert: true });
   await ctx.answerCbQuery(`Seeding: ${next ? 'ON' : 'OFF'}`);
@@ -506,7 +516,7 @@ bot.action('admin_toggle_seed', async (ctx) => {
 
 bot.action('admin_toggle_pub', async (ctx) => {
   if (!isAdmin(ctx.from?.id)) return ctx.answerCbQuery('Admins only');
-  const s: any = await AppSettings.findOne({ key: 'global' });
+  const s: any = await AppSettings.findOne({ key: 'global' }).lean();
   const next = !(s?.autoPublishEnabled ?? true);
   await AppSettings.updateOne({ key: 'global' }, { $set: { autoPublishEnabled: next } }, { upsert: true });
   await ctx.answerCbQuery(`Publishing: ${next ? 'ON' : 'OFF'}`);
@@ -515,7 +525,7 @@ bot.action('admin_toggle_pub', async (ctx) => {
 
 bot.action('admin_toggle_ai', async (ctx) => {
   if (!isAdmin(ctx.from?.id)) return ctx.answerCbQuery('Admins only');
-  const s: any = await AppSettings.findOne({ key: 'global' });
+  const s: any = await AppSettings.findOne({ key: 'global' }).lean();
   const next = !(s?.aiEnabled ?? true);
   await AppSettings.updateOne({ key: 'global' }, { $set: { aiEnabled: next } }, { upsert: true });
   await ctx.answerCbQuery(`AI: ${next ? 'ON' : 'OFF'}`);
@@ -526,12 +536,12 @@ bot.action('admin_run_now', async (ctx) => {
   if (!isAdmin(ctx.from?.id)) return ctx.answerCbQuery('Admins only');
   if (resetWorkerLockFn) resetWorkerLockFn();
   await AppSettings.updateOne({ key: 'global' }, { $set: { autoPublishEnabled: true } }, { upsert: true });
-  await ctx.answerCbQuery('Triggered!');
+  await ctx.answerCbQuery('Done');
   if (triggerWorkerNow) {
     triggerWorkerNow().catch((e) => console.error(e));
     return ctx.reply('⚡ Immediate batch started!');
   }
-  return ctx.reply('ℹ️ Worker runs via GitHub Actions schedule (or trigger manually in GitHub Actions tab).');
+  return ctx.reply('ℹ️ Auto-poster runs automatically every 5 mins via GitHub Actions (or run manually in GitHub Actions tab).');
 });
 
 bot.action('admin_menu_time', async (ctx) => {
@@ -593,7 +603,7 @@ bot.action('admin_menu_links', async (ctx) => {
 const promptStep = (actionName: string, stepName: string, msg: string) => {
   bot.action(actionName, async (ctx) => {
     if (!isAdmin(ctx.from?.id)) return ctx.answerCbQuery('Admins only');
-    adminSession.set(ctx.from.id, { step: stepName });
+    if (ctx.from?.id) await setAdminStep(ctx.from.id, stepName);
     await ctx.answerCbQuery();
     return ctx.reply(msg);
   });
@@ -641,8 +651,8 @@ bot.command('status', async (ctx) => {
 });
 
 bot.command('latest', async (ctx) => {
-  const items = await MediaItem.find().select('_id title releaseDate').sort({ releaseDate: -1 }).limit(10).lean();
-  if (items.length === 0) return ctx.reply('No titles yet.');
+  const items: any = await MediaItem.find().select('_id title releaseDate').sort({ releaseDate: -1 }).limit(10).lean();
+  if (!items || items.length === 0) return ctx.reply('No titles yet.');
   const buttons: any[] = items.map((item: any, i: number) => [
     Markup.button.callback(`${i + 1}. 🎬 ${item.title} (${item.releaseDate ? String(item.releaseDate).substring(0, 4) : 'N/A'})`, `view_${item._id}`)
   ]);
@@ -679,8 +689,7 @@ bot.action(/^view_(.+)$/, async (ctx) => {
 });
 
 const saveTMDBHitsToDB = async (hits: any[]) => {
-  const topHits = hits.slice(0, 5);
-  for (const hit of topHits) {
+  for (const hit of hits.slice(0, 5)) {
     const mediaType: 'movie' | 'tv' = hit.media_type === 'tv' ? 'tv' : 'movie';
     const alreadyDone = await PostedHistory.findOne({ tmdbId: hit.id, mediaType }).lean();
     if (alreadyDone) continue;
@@ -749,14 +758,13 @@ const handleTitleSearch = async (ctx: any, rawQuery: string) => {
 
       if (results.length === 0) {
         usedFuzzyOrSpellingFix = true;
-        // Projection + lean saves ~95% RAM and Mongo bandwidth
-        const candidates = await MediaItem.find()
+        const candidates: any = await MediaItem.find()
           .select('_id title releaseDate isPublished')
           .sort({ updatedAt: -1 })
           .limit(300)
           .lean();
 
-        const scored = candidates
+        const scored = (candidates || [])
           .map((item: any) => ({
             item,
             score: Math.max(
@@ -812,15 +820,14 @@ bot.command('search', async (ctx) => {
 
 bot.on('message', async (ctx: any) => {
   const uid = ctx.from?.id;
-  const sess = uid ? adminSession.get(uid) : undefined;
+  const step = uid && isAdmin(uid) ? await getAdminStep(uid) : '';
 
-  if (sess && isAdmin(uid)) {
-    const step = sess.step;
-    adminSession.delete(uid);
+  if (step && isAdmin(uid)) {
+    await clearAdminStep(uid);
 
     if (step === 'BROADCAST' || step === 'BROADCAST_PIN') {
       const pin = step === 'BROADCAST_PIN';
-    const userList: any[] = await BotUser.find({ isBanned: { $ne: true } }).select('telegramId').lean();
+      const userList: any = await BotUser.find({ isBanned: { $ne: true } }).select('telegramId').lean();
       let sent = 0, pinned = 0, failed = 0;
       await ctx.reply(`⏳ Broadcasting to ${userList.length} users...`);
       for (const u of userList) {
@@ -864,13 +871,11 @@ bot.catch((err: any, ctx: any) => {
   console.warn(`⚠️ Telegram Error (${ctx?.updateType || 'update'}):`, err?.message || err);
 });
 
-// Exported webhook handler for Vercel Serverless (api/webhook.ts)
 export const handleWebhookUpdate = async (body: any) => {
   await ensureDbConnected();
   await bot.handleUpdate(body);
 };
 
-// Only run HTTP server + polling when started directly (`node dist/index.js`)
 const startApp = async () => {
   const PORT = Number(process.env.PORT || 10000);
   http.createServer((_req, res) => {
@@ -879,7 +884,6 @@ const startApp = async () => {
   }).listen(PORT, '0.0.0.0', () => console.log(`✅ Listening on ${PORT}`));
 
   await ensureDbConnected();
-  // $setOnInsert: Admin Panel settings will NOT be overwritten on restart
   await AppSettings.updateOne(
     { key: 'global' },
     { $setOnInsert: { autoPublishEnabled: true, autoSeedingEnabled: true, publishIntervalMinutes: 5, postsPerBatch: 10 } },
