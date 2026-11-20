@@ -6,9 +6,9 @@ import { AppSettings } from './database/models';
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
 const main = async () => {
-  console.log('🚀 Starting GitHub Actions Worker...');
+  console.log('🔄 Starting GitHub Actions 24/7 Worker...');
   const startedAt = Date.now();
-  const MAX_RUN_MS = 25 * 60 * 1000; // 25 mins max per Actions run
+  const MAX_RUN_MS = 5 * 60 * 60 * 1000; // 5 hours per Actions run (under 6h GitHub limit)
 
   try {
     await ensureDbConnected();
@@ -16,17 +16,13 @@ const main = async () => {
     while (Date.now() - startedAt < MAX_RUN_MS) {
       const s: any = await AppSettings.findOne({ key: 'global' }).lean();
       if (s && !s.autoPublishEnabled && !s.autoSeedingEnabled) {
-        console.log('⏸️ Both Auto-Publish and Auto-Seeding are paused.');
-        break;
+        console.log('⏸ Both Auto-Publish and Auto-Seeding are paused. Checking again in 60s...');
+        await sleep(60000);
+        continue;
       }
 
       const intervalMins = Math.max(1, Number(s?.publishIntervalMinutes || 1));
       await runWorkerCycle(false);
-
-      // If admin set >= 15 mins, 1 check per 15-min GitHub cron run is enough
-      if (intervalMins >= 15) {
-        break;
-      }
 
       const fresh: any = await AppSettings.findOne({ key: 'global' }).lean();
       const lastPub = fresh?.lastPublishAt ? new Date(fresh.lastPublishAt).getTime() : Date.now();
@@ -46,7 +42,7 @@ const main = async () => {
       await sleep(waitMs);
     }
 
-    console.log('✅ Worker Run Completed Successfully.');
+    console.log('✅ 5-Hour Worker Run Completed. Handing off to next run...');
   } catch (err) {
     console.error('❌ Worker Run Failed:', err);
     process.exitCode = 1;
