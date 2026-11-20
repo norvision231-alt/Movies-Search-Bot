@@ -2,7 +2,7 @@ name: Movie Bot Auto-Poster
 
 on:
   schedule:
-    - cron: '*/15 * * * *'
+    - cron: '*/30 * * * *'
   workflow_dispatch:
 
 concurrency:
@@ -12,7 +12,7 @@ concurrency:
 jobs:
   seed-and-publish:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 330
 
     steps:
       - name: Checkout repository
@@ -28,7 +28,7 @@ jobs:
           npm install
           npm run build
 
-      - name: Run Seeding & Publishing Loop
+      - name: Run Seeding & Publishing Loop (5 Hours)
         env:
           BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
           MONGODB_URI: ${{ secrets.MONGODB_URI }}
@@ -38,3 +38,13 @@ jobs:
           CHATGPT_API_KEY: ${{ secrets.CHATGPT_API_KEY }}
           DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
         run: npm run worker:once
+
+      - name: Auto-Trigger Next 5-Hour Run
+        if: always()
+        run: |
+          curl -X POST \
+            -H "Accept: application/vnd.github+json" \
+            -H "Authorization: Bearer ${{ secrets.GH_PAT }}" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            "https://api.github.com/repos/${{ github.repository }}/actions/workflows/auto-poster.yml/dispatches" \
+            -d '{"ref":"main"}'
