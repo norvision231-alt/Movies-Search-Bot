@@ -8,7 +8,7 @@ const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 const main = async () => {
   console.log('🚀 Starting GitHub Actions Worker...');
   const startedAt = Date.now();
-  const MAX_RUN_MS = 4.5 * 60 * 1000; // 4.5 mins max per Actions run
+  const MAX_RUN_MS = 25 * 60 * 1000; // 25 mins max per Actions run
 
   try {
     await ensureDbConnected();
@@ -23,8 +23,8 @@ const main = async () => {
       const intervalMins = Math.max(1, Number(s?.publishIntervalMinutes || 1));
       await runWorkerCycle(false);
 
-      // If admin set >= 5 mins, 1 check per GitHub cron run is enough
-      if (intervalMins >= 5) {
+      // If admin set >= 15 mins, 1 check per 15-min GitHub cron run is enough
+      if (intervalMins >= 15) {
         break;
       }
 
@@ -42,7 +42,7 @@ const main = async () => {
         break;
       }
 
-      console.log(`⏳ Waiting ${Math.ceil(waitMs / 1000)}s for next 1-min batch...`);
+      console.log(`⏳ Waiting ${Math.ceil(waitMs / 1000)}s for next batch...`);
       await sleep(waitMs);
     }
 
